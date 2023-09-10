@@ -464,19 +464,23 @@ func decodeTrafficDirection(srcEP uint32, dn *monitor.DropNotify, tn *monitor.Tr
 		// tracking result from the `Reason` field to invert the direction for
 		// reply packets. The datapath currently populates the `Reason` field
 		// with CT information for some observation points.
-		if monitor.TraceReasonIsKnown(tn.Reason) {
-			// true if the traffic source is the local endpoint, i.e. egress
-			isSourceEP := tn.Source == uint16(srcEP)
-			// true if the packet is a reply, i.e. reverse direction
-			isReply := tn.Reason & ^monitor.TraceReasonEncryptMask == monitor.TraceReasonCtReply
+		// if monitor.TraceReasonIsKnown(tn.Reason) {
+		// 	// true if the traffic source is the local endpoint, i.e. egress
+		// 	isSourceEP := tn.Source == uint16(srcEP)
+		// 	// true if the packet is a reply, i.e. reverse direction
+		// 	isReply := tn.Reason & ^monitor.TraceReasonEncryptMask == monitor.TraceReasonCtReply
 
-			// isSourceEP != isReply ==
-			//  (isSourceEP && !isReply) || (!isSourceEP && isReply)
-			if isSourceEP != isReply {
-				return pb.TrafficDirection_EGRESS
-			}
-			return pb.TrafficDirection_INGRESS
+		// 	// isSourceEP != isReply ==
+		// 	//  (isSourceEP && !isReply) || (!isSourceEP && isReply)
+		// 	if isSourceEP != isReply {
+		// 		return pb.TrafficDirection_EGRESS
+		// 	}
+		// 	return pb.TrafficDirection_INGRESS
+		// }
+		if tn.Source == uint16(srcEP) {
+			return pb.TrafficDirection_EGRESS
 		}
+		return pb.TrafficDirection_INGRESS
 	}
 	if pvn != nil {
 		if pvn.IsTrafficIngress() {
