@@ -17,6 +17,7 @@ import (
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache/types"
+	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -730,4 +731,15 @@ func (ipc *IPCache) TriggerLabelInjection() {
 		)
 	})
 	ipc.controllers.TriggerController(LabelInjectorName)
+}
+
+func (ipc *IPCache) UpsertLabelsWithoutInjection(prefix netip.Prefix, lbls labels.Labels, src source.Source, resource ipcacheTypes.ResourceID) {
+	ipc.metadata.Lock()
+	ipc.metadata.upsertLocked(prefix, src, resource, lbls)
+	ipc.metadata.Unlock()
+}
+func (ipc *IPCache) RemoveLabelsWithoutInjection(prefix netip.Prefix, lbls labels.Labels, resource ipcacheTypes.ResourceID) {
+	ipc.metadata.Lock()
+	ipc.metadata.remove(prefix, resource, lbls)
+	ipc.metadata.Unlock()
 }

@@ -12,7 +12,9 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/pkg/identity"
+	ippkg "github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/ipcache"
+	ipcachetypes "github.com/cilium/cilium/pkg/ipcache/types"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	"github.com/cilium/cilium/pkg/k8s/types"
 	"github.com/cilium/cilium/pkg/kvstore"
@@ -22,6 +24,8 @@ import (
 	"github.com/cilium/cilium/pkg/source"
 	ciliumTypes "github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/u8proto"
+
+	"github.com/cilium/cilium/pkg/labels"
 )
 
 func (k *K8sWatcher) ciliumEndpointsInit(ctx context.Context, asyncControllers *sync.WaitGroup) {
@@ -202,9 +206,24 @@ func (k *K8sWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint
 			}
 		}
 	}
+
+	for _, ip := range ipsAdded {
+		// Upsert the labels for the CiliumEndpoint.
+		endpointResourceID := ipcachetypes.NewResourceID(ipcachetypes.ResourceKindEndpoint, endpoint.Namespace, endpoint.Name)
+		lbls := labels.NewLabelsFromModel(endpoint.Identity.Labels)
+		ipPrefix := ippkg.IPToNetPrefix(net.ParseIP(ip))
+		k.ipcache.UpsertLabelsWithoutInjection(ipPrefix, lbls, labels.LabelSourceK8s, endpointResourceID)
+		log.WithFields(logrus.Fields{
+			"cep watcher": "endpointUpdated",
+			"ip":          ip,
+			"cilium_id":   endpointResourceID,
+			"labels":      lbls,
+		}).Info("Added labels to IP")
+	}
 }
 
 func (k *K8sWatcher) endpointDeleted(endpoint *types.CiliumEndpoint) {
+	ipsRemoved := []string{}
 	if endpoint.Networking != nil {
 		namedPortsChanged := false
 		for _, pair := range endpoint.Networking.Addressing {
@@ -213,6 +232,7 @@ func (k *K8sWatcher) endpointDeleted(endpoint *types.CiliumEndpoint) {
 				if portsChanged {
 					namedPortsChanged = true
 				}
+				ipsRemoved = append(ipsRemoved, pair.IPV4)
 			}
 
 			if pair.IPV6 != "" {
@@ -220,10 +240,25 @@ func (k *K8sWatcher) endpointDeleted(endpoint *types.CiliumEndpoint) {
 				if portsChanged {
 					namedPortsChanged = true
 				}
+				ipsRemoved = append(ipsRemoved, pair.IPV4)
 			}
 		}
 		if namedPortsChanged {
 			k.policyManager.TriggerPolicyUpdates(true, "Named ports deleted")
 		}
+	}
+
+	for _, ip := range ipsRemoved {
+		// Delete the labels for the CiliumEndpoint.
+		// Required for Retina.
+		endpointResourceID := ipcachetypes.NewResourceID(ipcachetypes.ResourceKindEndpoint, endpoint.Namespace, endpoint.Name)
+		lbls := labels.NewLabelsFromModel(endpoint.Identity.Labels)
+		ipPrefix := ippkg.IPToNetPrefix(net.ParseIP(ip))
+		k.ipcache.RemoveLabelsWithoutInjection(ipPrefix, lbls, endpointResourceID)
+		log.WithFields(logrus.Fields{
+			"cep watcher": "endpointDeleted",
+			"ip":          ip,
+			"cilium_id":   endpointResourceID,
+		}).Info("Removed labels from IP")
 	}
 }
