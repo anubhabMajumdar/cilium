@@ -126,6 +126,7 @@ spec:
         - cilium-agent
         args:
         - --config-dir=/tmp/cilium/config-map
+        - --static-cnp-path=/policies
         {{- with .Values.extraArgs }}
         {{- toYaml . | trim | nindent 8 }}
         {{- end }}
@@ -283,6 +284,8 @@ spec:
           {{- end }}
         terminationMessagePolicy: FallbackToLogsOnError
         volumeMounts:
+        - name: static-policies
+          mountPath: /policies
         {{- if .Values.authentication.mutual.spire.enabled }}
         - name: spire-agent-socket
           mountPath: {{ dir .Values.authentication.mutual.spire.adminSocketPath }}
@@ -795,6 +798,10 @@ spec:
       {{- end }}
       {{- end }}
       volumes:
+      - name: static-policies
+        hostPath:
+          path: /tmp/policies
+          type: DirectoryOrCreate
         # For sharing configuration between the "config" initContainer and the agent
       - name: tmp
         emptyDir: {}

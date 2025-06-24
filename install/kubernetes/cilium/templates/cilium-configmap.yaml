@@ -171,7 +171,7 @@ data:
 {{- end }}
 
   # If you want to run cilium in debug mode change this value to true
-  debug: {{ .Values.debug.enabled | quote }}
+  debug: "false"
 
 {{- if hasKey .Values.debug "verbose" }}
   debug-verbose: "{{ .Values.debug.verbose }}"
