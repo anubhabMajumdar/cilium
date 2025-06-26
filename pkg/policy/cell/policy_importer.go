@@ -261,11 +261,20 @@ func (i *policyImporter) prunePrefixes(prunePrefixes map[ipcachetypes.ResourceID
 // CIDR identities.
 // (Does not actually return error, just to satisfy the Job signature)
 func (i *policyImporter) processUpdates(ctx context.Context, updates []*policytypes.PolicyUpdate) error {
+	scoppedLogger := i.log.With(
+		"traceFunction93=policy.processUpdates",
+	)
+	scoppedLogger.Info("Processing policy updates")
+	// Log the policy updates that we are about to process.
+	for _, upd := range updates {
+		scoppedLogger.Info("Policy update", upd.String())
+	}
+
 	if len(updates) == 0 {
 		return nil
 	}
 
-	i.log.Info("Processing policy updates", logfields.Count, len(updates))
+	scoppedLogger.Info("Processing policy updates", logfields.Count, len(updates))
 
 	// First, allocate local identities for all prefixes referenced by policies.
 	//
@@ -311,24 +320,24 @@ func (i *policyImporter) processUpdates(ctx context.Context, updates []*policyty
 			if len(upd.Rules) == 0 && len(replaceLabels) == 0 {
 				// No rules, no resource, no labels. This means we should clear all policies.
 				// Add an empty label selector
-				i.log.Info("Policy replace request with no labels, deleting all policies!")
+				scoppedLogger.Info("Policy replace request with no labels, deleting all policies!")
 				replaceLabels = append(replaceLabels, labels.LabelArray{})
 			}
 
 			if len(replaceLabels) >= 0 {
-				i.log.Info("Replacing policy by labels", logfields.Labels, replaceLabels, logfields.Count, len(upd.Rules))
+				scoppedLogger.Info("Replacing policy by labels", logfields.Labels, replaceLabels, logfields.Count, len(upd.Rules))
 			}
 			regen, endRevision, oldRuleCnt = i.repo.ReplaceByLabels(upd.Rules, replaceLabels)
 		}
 
 		if len(upd.Rules) == 0 {
-			i.log.Info("Deleted policy from repository",
+			scoppedLogger.Info("Deleted policy from repository",
 				logfields.Resource, upd.Resource,
 				logfields.PolicyRevision, endRevision,
 				"deletedRules", oldRuleCnt,
 				logfields.Identity, slices.Collect(truncate(regen.Members(), 100)))
 		} else {
-			i.log.Info("Upserted policy to repository",
+			scoppedLogger.Info("Upserted policy to repository",
 				logfields.Resource, upd.Resource,
 				logfields.PolicyRevision, endRevision,
 				"deletedRules", oldRuleCnt,
@@ -369,14 +378,14 @@ func (i *policyImporter) processUpdates(ctx context.Context, updates []*policyty
 
 			err := i.monitorAgent.SendEvent(monitorapi.MessageTypeAgent, msg)
 			if err != nil {
-				i.log.Error("Failed to send policy update as monitor notification", logfields.Error, err)
+				scoppedLogger.Error("Failed to send policy update as monitor notification", logfields.Error, err)
 			}
 		}
 	}
 
 	// All policy updates have been applied; regenerate all affected endpoints.
 	// Unaffected endpoints can merely have their policy revision set.
-	i.log.Info("Policy repository updates complete, triggering endpoint updates",
+	scoppedLogger.Info("Policy repository updates complete, triggering endpoint updates",
 		logfields.PolicyRevision, endRevision)
 	if i.epm != nil {
 		i.epm.UpdatePolicy(idsToRegen, startRevision, endRevision)

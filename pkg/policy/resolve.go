@@ -195,6 +195,15 @@ func (p *selectorPolicy) DistillPolicy(policyOwner PolicyOwner, redirects map[st
 	return calculatedPolicy
 }
 
+func (p *EndpointPolicy) String() string {
+	return fmt.Sprintf("EndpointPolicy{Revision: %d, VersionHandle: %s, MapState: %s, Redirects: %v}",
+		p.selectorPolicy.Revision,
+		p.VersionHandle,
+		p.policyMapState,
+		p.Redirects,
+	)
+}
+
 // Ready releases the handle on a selector cache version so that stale state can be released.
 // This should be called when the policy has been realized.
 func (p *EndpointPolicy) Ready() (err error) {

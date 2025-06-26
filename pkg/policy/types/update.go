@@ -42,3 +42,11 @@ type PolicyUpdate struct {
 	// Thus must be a buffered channel!
 	DoneChan chan<- uint64
 }
+
+func (pu *PolicyUpdate) String() string {
+	return pu.Rules.String() + " " + string(pu.Resource) +
+		" ReplaceByLabels=" + labels.LabelArray(pu.ReplaceWithLabels).String() +
+		" ReplaceWithLabels=" + pu.ReplaceWithLabels.String() +
+		" Source=" + string(pu.Source) +
+		" ProcessingStartTime=" + pu.ProcessingStartTime.String()
+}

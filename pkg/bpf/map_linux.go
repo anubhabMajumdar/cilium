@@ -607,11 +607,16 @@ type DumpCallback func(key MapKey, value MapValue)
 // TODO(tb): This package currently doesn't support dumping per-cpu maps, as
 // ReadValueSize is always set to the size of a single value.
 func (m *Map) DumpWithCallback(cb DumpCallback) error {
+	// scoppedLogger := m.scopedLogger().WithField("traceFunction93", "bpf.DumpWithCallback")
 	if cb == nil {
+		// scoppedLogger.Error("DumpWithCallback called with empty callback")
 		return errors.New("empty callback")
 	}
 
+	// scoppedLogger.Info("Dumping map with callback")
+
 	if err := m.Open(); err != nil {
+		// scoppedLogger.WithError(err).Error("Failed to open map for dumping")
 		return err
 	}
 
@@ -619,17 +624,45 @@ func (m *Map) DumpWithCallback(cb DumpCallback) error {
 	defer m.lock.RUnlock()
 
 	// Don't need deep copies here, only fresh pointers.
+	// scoppedLogger.Info("Iterating over map entries")
 	mk := m.key.New()
 	mv := m.value.New()
 
-	i := m.m.Iterate()
-	for i.Next(mk, mv) {
-		cb(mk, mv)
-
-		mk = m.key.New()
-		mv = m.value.New()
+	if m.m == nil {
+		// scoppedLogger.Error("Map is closed, cannot dump")
+		return errors.New("map is closed")
 	}
 
+	i := m.m.Iterate()
+	if i == nil {
+		// scoppedLogger.Error("Failed to create map iterator")
+		return fmt.Errorf("failed to create map iterator for %s", m.name)
+	}
+	// scoppedLogger.WithField("i.Err()", i.Err()).Info("Map entries to iterate")
+	// if i.Err() != nil {
+	// 	scoppedLogger.WithError(i.Err()).Error("Failed to create map iterator")
+	// 	return fmt.Errorf("failed to create map iterator for %s: %w", m.name, i.Err())
+	// }
+	for i.Next(mk, mv) {
+		// scoppedLogger.WithFields(logrus.Fields{
+		// 	logfields.Key:   mk.String(),
+		// 	logfields.Value: mv.String(),
+		// }).Info("Dumping map entry")
+
+		cb(mk, mv)
+
+		// scoppedLogger.WithFields(logrus.Fields{
+		// 	logfields.Key:   mk.String(),
+		// 	logfields.Value: mv.String(),
+		// }).Info("Post CB map entry")
+
+		mk = m.key.New()
+		// scoppedLogger.WithField("mk", mk.String()).Info("Resetting key for next iteration")
+		mv = m.value.New()
+		// scoppedLogger.WithField("mv", mv.String()).Info("Resetting value for next iteration")
+	}
+
+	// scoppedLogger.WithField("i.Err()", i.Err()).Info("Finished iterating over map entries")
 	return i.Err()
 }
 

@@ -181,15 +181,32 @@ func (e *Endpoint) regeneratePolicy(stats *regenerationStatistics, datapathRegen
 		rf  revert.RevertFunc
 	)
 
+	scoppedLogger := e.getLogger().WithFields(logrus.Fields{
+		logfields.EndpointID: e.ID,
+		logfields.Reason:     "regenerating policy",
+		"traceFunction93":    "endpoint.regeneratePolicy",
+		"traceID":            "coredns-" + e.SecurityIdentity.StringID(),
+	})
+	if e.policyMap == nil {
+		scoppedLogger.Info("Policy map is empty")
+	} else {
+		if pm, err := e.policyMap.Dump(); err != nil {
+			scoppedLogger.WithError(err).Error("Failed to dump policy map before regeneration")
+		} else {
+			scoppedLogger.WithField("policyMap", pm).Info("Policy map before regeneratePolicy")
+		}
+	}
+
 	// lock the endpoint, read our values, then unlock
 	err = e.lockAlive()
 	if err != nil {
+		scoppedLogger.WithError(err).Error("Endpoint disappeared while regenerating policy")
 		return err
 	}
 
 	// No point in calculating policy if endpoint does not have an identity yet.
 	if e.SecurityIdentity == nil {
-		e.getLogger().Warn("Endpoint lacks identity, skipping policy calculation")
+		scoppedLogger.Warn("Endpoint lacks identity, skipping policy calculation")
 		e.unlock()
 		return nil
 	}
@@ -210,35 +227,43 @@ func (e *Endpoint) regeneratePolicy(stats *regenerationStatistics, datapathRegen
 	}
 	e.unlock()
 
-	e.getLogger().Debug("Starting policy recalculation...")
+	scoppedLogger.Info("Starting policy recalculation...")
 	skipPolicyRevision := e.nextPolicyRevision
 	if forcePolicyCompute || e.desiredPolicy == nil {
-		e.getLogger().Debug("Forced policy recalculation")
+		scoppedLogger.Debug("Forced policy recalculation")
 		skipPolicyRevision = 0
 	}
 
 	var selectorPolicy policy.SelectorPolicy
 	selectorPolicy, result.policyRevision, err = e.policyGetter.GetPolicyRepository().GetSelectorPolicy(securityIdentity, skipPolicyRevision, stats)
 	if err != nil {
-		e.getLogger().WithError(err).Warning("Failed to calculate SelectorPolicy")
+		scoppedLogger.WithError(err).Info("Failed to calculate SelectorPolicy")
 		return err
 	}
 
 	// selectorPolicy is nil if skipRevision was matched.
 	if selectorPolicy == nil {
-		e.getLogger().WithFields(logrus.Fields{
-			"policyRevision.next": e.nextPolicyRevision,
-			"policyRevision.repo": result.policyRevision,
-			"policyChanged":       e.nextPolicyRevision > e.policyRevision,
-		}).Debug("Skipping unnecessary endpoint policy recalculation")
+		scoppedLogger.WithFields(logrus.Fields{
+			"policyRevision.next":   e.nextPolicyRevision,
+			"policyRevision.repo":   result.policyRevision,
+			"policyChanged":         e.nextPolicyRevision > e.policyRevision,
+			"result.endpointPolicy": result.endpointPolicy,
+			"result.PolicyRevision": result.policyRevision,
+		}).Info("Skipping unnecessary endpoint policy recalculation")
 		datapathRegenCtxt.policyResult = result
 		return nil
 	}
+
+	scoppedLogger.WithFields(logrus.Fields{
+		"selectorPolicy":        selectorPolicy,
+		"result.PolicyRevision": result.policyRevision,
+	}).Info("Calculated SelectorPolicy")
 
 	// Add new redirects before Consume() so that all required proxy ports are available for it.
 	var desiredRedirects map[string]uint16
 	err = e.rlockAlive()
 	if err != nil {
+		scoppedLogger.WithError(err).Error("Endpoint disappeared while regenerating policy")
 		return err
 	}
 	// Ingress endpoint needs no redirects
@@ -267,8 +292,23 @@ func (e *Endpoint) regeneratePolicy(stats *regenerationStatistics, datapathRegen
 
 	// DistillPolicy converts a SelectorPolicy in to an EndpointPolicy
 	result.endpointPolicy = selectorPolicy.DistillPolicy(e, desiredRedirects)
+	scoppedLogger.WithFields(logrus.Fields{
+		"result.endpointPolicy": result.endpointPolicy,
+		"result.PolicyRevision": result.policyRevision,
+	}).Info("Distilled EndpointPolicy from SelectorPolicy")
 
 	datapathRegenCtxt.policyResult = result
+
+	// if e.policyMap == nil {
+	// 	scoppedLogger.Info("Policy map is empty")
+	// } else {
+	// 	if pm, err := e.policyMap.Dump(); err != nil {
+	// 		scoppedLogger.WithError(err).Error("Failed to dump policy map before regeneration")
+	// 	} else {
+	// 		scoppedLogger.WithField("policyMap", pm).Info("Policy map after regeneratePolicy")
+	// 	}
+	// }
+
 	return nil
 }
 
@@ -288,11 +328,28 @@ func (e *Endpoint) regeneratePolicy(stats *regenerationStatistics, datapathRegen
 // the ipcache may remove an identity from the ipcache that the bpf PolicyMap is still
 // relying on.
 func (e *Endpoint) setDesiredPolicy(datapathRegenCtxt *datapathRegenerationContext) error {
+	scoppedLogger := e.getLogger().WithFields(logrus.Fields{
+		logfields.EndpointID: e.ID,
+		"traceFunction93":    "endpoint.setDesiredPolicy",
+		"traceID":            "coredns-" + e.SecurityIdentity.StringID(),
+	})
+	// Print e.policyMap
+	if e.policyMap == nil {
+		scoppedLogger.Info("Policy map is empty")
+	} else {
+		if pm, err := e.policyMap.Dump(); err != nil {
+			scoppedLogger.WithError(err).Error("Failed to dump policy map before regeneration")
+		} else {
+			scoppedLogger.WithField("policyMap name", e.policyMap.String()).Info("Policy map name")
+			scoppedLogger.WithField("policyMap", pm).Info("Policy map before setDesiredPolicy")
+		}
+	}
+
 	res := datapathRegenCtxt.policyResult
 	// nil result means endpoint had no identity while policy was calculated
 	if res == nil {
 		if e.SecurityIdentity != nil {
-			e.getLogger().Info("Endpoint SecurityIdentity changed during policy regeneration")
+			scoppedLogger.Info("Endpoint SecurityIdentity changed during policy regeneration")
 			return fmt.Errorf("endpoint %d SecurityIdentity changed during policy regeneration", e.ID)
 		}
 
@@ -304,13 +361,20 @@ func (e *Endpoint) setDesiredPolicy(datapathRegenCtxt *datapathRegenerationConte
 		// This is needed to release resources held for the EndpointPolicy
 		res.release()
 
-		e.getLogger().Info("Endpoint SecurityIdentity changed during policy regeneration")
+		scoppedLogger.WithFields(logrus.Fields{
+			"oldIdentity": e.SecurityIdentity,
+			"newIdentity": res.identityRevision,
+		}).Info("Endpoint SecurityIdentity changed during policy regeneration")
 		return fmt.Errorf("endpoint %d SecurityIdentity changed during policy regeneration", e.ID)
 	}
 
 	// Set the revision of this endpoint to the current revision of the policy
 	// repository.
 	e.setNextPolicyRevision(res.policyRevision)
+	scoppedLogger.WithFields(logrus.Fields{
+		logfields.PolicyRevision:        e.policyRevision,
+		logfields.DesiredPolicyRevision: e.nextPolicyRevision,
+	}).Info("Setting desired policy revision for endpoint")
 
 	if res.endpointPolicy != nil && res.endpointPolicy != e.desiredPolicy {
 		if e.desiredPolicy != e.realizedPolicy {
@@ -321,6 +385,7 @@ func (e *Endpoint) setDesiredPolicy(datapathRegenCtxt *datapathRegenerationConte
 			e.desiredPolicy.Ready()
 			// Detach the EndpointPolicy from the SelectorPolicy it was instantiated from
 			e.desiredPolicy.Detach()
+			scoppedLogger.Info("Detaching old desired policy")
 		}
 
 		e.desiredPolicy = res.endpointPolicy
@@ -331,23 +396,37 @@ func (e *Endpoint) setDesiredPolicy(datapathRegenCtxt *datapathRegenerationConte
 		datapathRegenCtxt.revertStack.Push(func() error {
 			// Do nothing if e.policyMap was not initialized already
 			if e.policyMap != nil && e.desiredPolicy != e.realizedPolicy {
+				scoppedLogger.Info("Reverting to last known good policy")
+
 				e.desiredPolicy.Detach()
 				e.desiredPolicy = e.realizedPolicy
 
 				currentMap, err := e.dumpPolicyMapToMapStateMap()
 				if err != nil {
+					scoppedLogger.WithError(err).Error("Failed to dump PolicyMap when trying to revert failed endpoint regeneration")
 					return fmt.Errorf("unable to dump PolicyMap when trying to revert failed endpoint regeneration: %w", err)
 				}
-
 				_, _, err = e.syncPolicyMapWith(currentMap, false)
 				if err != nil {
-					e.getLogger().WithError(err).Errorf("failed to sync PolicyMap when reverting to last known good policy")
+					scoppedLogger.WithError(err).Errorf("failed to sync PolicyMap when reverting to last known good policy")
 				}
 			}
+			scoppedLogger.Info("Reverted to last known good policy. Returning")
 			return nil
 		})
 	}
 	res.endpointPolicy = nil
+
+	if e.policyMap == nil {
+		scoppedLogger.Info("Policy map is empty")
+	} else {
+		if pm, err := e.policyMap.Dump(); err != nil {
+			scoppedLogger.WithError(err).Error("Failed to dump policy map before regeneration")
+		} else {
+			scoppedLogger.WithField("policyMap name", e.policyMap.String()).Info("Policy map name after setDesiredPolicy")
+			scoppedLogger.WithField("policyMap", pm).Info("Policy map after setDesiredPolicy")
+		}
+	}
 
 	return nil
 }
@@ -525,6 +604,14 @@ func (e *Endpoint) updateRealizedState(stats *regenerationStatistics, origDir st
 
 	defer e.unlock()
 
+	scoppedLogger := e.getLogger().WithFields(logrus.Fields{
+		logfields.EndpointID: e.ID,
+		logfields.Reason:     "updating realized state",
+		"traceFunction93":    "endpoint.updateRealizedState",
+		"traceID":            "coredns-" + e.SecurityIdentity.StringID(),
+	})
+	scoppedLogger.Info("Updating realized state for endpoint")
+
 	// Depending upon result of BPF regeneration (compilation executed),
 	// shift endpoint directories to match said BPF regeneration
 	// results.
@@ -541,6 +628,12 @@ func (e *Endpoint) updateRealizedState(stats *regenerationStatistics, origDir st
 	}
 
 	if e.desiredPolicy != e.realizedPolicy {
+		scoppedLogger.WithFields(logrus.Fields{
+			"desiredPolicyRevision":  e.desiredPolicy.Revision,
+			"realizedPolicyRevision": e.realizedPolicy.Revision,
+			"desiredPolicy":          e.desiredPolicy.String(),
+			"realizedPolicy":         e.realizedPolicy.String(),
+		}).Info("Updating realized policy for endpoint")
 		// Remove references to the old policy
 		e.realizedPolicy.Detach()
 		// Set realized state to desired state.
@@ -643,9 +736,31 @@ func (e *Endpoint) UpdatePolicy(idsToRegen *set.Set[identityPkg.NumericIdentity]
 	// no deferred unlocks here, as we must
 	// release locks before regenerating
 
+	scoppedLogger := e.getLogger().WithFields(logrus.Fields{
+		logfields.EndpointID:         e.ID,
+		"securityIdentity":           e.SecurityIdentity,
+		logfields.PolicyRevision:     fromRev,
+		"logfields.PolicyRevisionTo": toRev,
+		logfields.Reason:             "policy rules updated",
+		"traceFunction93":            "endpoint.UpdatePolicy",
+	})
+	scoppedLogger.Info("Updating endpoint policy")
+
+	if e.policyMap == nil {
+		scoppedLogger.Info("Policy map is empty")
+	} else {
+		if pm, err := e.policyMap.Dump(); err != nil {
+			scoppedLogger.WithError(err).Error("Failed to dump policy map before regeneration")
+		} else {
+			scoppedLogger.WithField("policyMap name", e.policyMap.String()).Info("Policy map name")
+			scoppedLogger.WithField("policyMap", pm).Info("Policy map before UpdatePolicy")
+		}
+	}
+
 	e.buildMutex.Lock() // buildMutex is required to update policy revision
 	if err := e.lockAlive(); err != nil {
 		e.buildMutex.Unlock()
+		scoppedLogger.WithError(err).Error("Endpoint disappeared while updating policy")
 		return
 	}
 
@@ -657,6 +772,7 @@ func (e *Endpoint) UpdatePolicy(idsToRegen *set.Set[identityPkg.NumericIdentity]
 	secID := e.getIdentity()
 	if secID == identityPkg.InvalidIdentity {
 		unlock()
+		scoppedLogger.Warn("Endpoint has no identity, skipping policy update")
 		return
 	}
 
@@ -668,12 +784,12 @@ func (e *Endpoint) UpdatePolicy(idsToRegen *set.Set[identityPkg.NumericIdentity]
 				// We can log this at less severity since a regeneration was already queued.
 				// This can happen if two policy updates come in quick succession, with the first
 				// affecting this endpoint and the second not.
-				e.getLogger().WithField(logfields.PolicyRevision, fromRev).Info("Endpoint missed a policy revision; triggering regeneration")
+				scoppedLogger.WithField(logfields.PolicyRevision, fromRev).Info("Endpoint missed a policy revision; triggering regeneration")
 			} else {
-				e.getLogger().WithField(logfields.PolicyRevision, fromRev).Warn("Endpoint missed a policy revision; triggering regeneration")
+				scoppedLogger.WithField(logfields.PolicyRevision, fromRev).Warn("Endpoint missed a policy revision; triggering regeneration")
 			}
 		} else {
-			e.getLogger().WithField(logfields.PolicyRevision, toRev).Debug("Policy update is a no-op, bumping policyRevision")
+			scoppedLogger.WithField(logfields.PolicyRevision, toRev).Info("Policy update is a no-op, bumping policyRevision")
 			e.setPolicyRevision(toRev)
 
 			unlock()
@@ -691,6 +807,17 @@ func (e *Endpoint) UpdatePolicy(idsToRegen *set.Set[identityPkg.NumericIdentity]
 
 	if regen {
 		<-e.Regenerate(regenMetadata)
+	}
+
+	if e.policyMap == nil {
+		scoppedLogger.Info("Policy map is empty")
+	} else {
+		if pm, err := e.policyMap.Dump(); err != nil {
+			scoppedLogger.WithError(err).Error("Failed to dump policy map before regeneration")
+		} else {
+			scoppedLogger.WithField("policyMap name", e.policyMap.String()).Info("Policy map name")
+			scoppedLogger.WithField("policyMap", pm).Info("Policy map after UpdatePolicy")
+		}
 	}
 }
 
@@ -719,6 +846,25 @@ func (e *Endpoint) RegenerateIfAlive(regenMetadata *regeneration.ExternalRegener
 // Should only be called with e.state at StateWaitingToRegenerate,
 // StateWaitingForIdentity, or StateRestoring
 func (e *Endpoint) Regenerate(regenMetadata *regeneration.ExternalRegenerationMetadata) <-chan bool {
+	scoppedLog := e.getLogger().WithFields(logrus.Fields{
+		logfields.EndpointID: e.ID,
+		logfields.Reason:     regenMetadata.Reason,
+		"level":              regenMetadata.RegenerationLevel.String(),
+		"traceFunction93":    "endpoint.Regenerate",
+	})
+	scoppedLog.Info("Regenerating endpoint")
+
+	if e.policyMap == nil {
+		scoppedLog.Error("Policy map is empty")
+	} else {
+		if pm, err := e.policyMap.Dump(); err != nil {
+			scoppedLog.WithError(err).Error("Failed to dump policy map before regeneration")
+		} else {
+			scoppedLog.WithField("policyMap name", e.policyMap.String()).Info("Policy map name")
+			scoppedLog.WithField("policyMap", pm).Info("Policy map before regeneration")
+		}
+	}
+
 	hr := e.GetReporter("datapath-regenerate")
 	done := make(chan bool, 1)
 
@@ -772,6 +918,7 @@ func (e *Endpoint) Regenerate(regenMetadata *regeneration.ExternalRegenerationMe
 				hr.Degraded("Endpoint regeneration failed", regenError)
 			} else {
 				hr.OK("Endpoint regeneration successful")
+				scoppedLog.Info("Endpoint regeneration successful")
 			}
 		} else {
 			// This may be unnecessary(?) since 'closing' of the results

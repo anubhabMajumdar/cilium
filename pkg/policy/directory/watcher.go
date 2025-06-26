@@ -196,7 +196,6 @@ func (p *policyWatcher) watchDirectory(ctx context.Context) {
 			if err != nil {
 				p.log.WithError(err).WithField(logfields.Path, absPath).Fatal("Failed to translate policy yaml file to cnp object")
 			} else {
-
 				err = p.addToPolicyEngine(cnp, absPath)
 				if err != nil {
 					p.log.WithError(err).WithField(logfields.Path, absPath).Fatal("Failed to add network policy to policy engine")

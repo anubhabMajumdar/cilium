@@ -430,6 +430,10 @@ type Endpoint struct {
 	ctMapGC ctmap.GCRunner
 }
 
+func (e *Endpoint) GetPolicyMap() *policymap.PolicyMap {
+	return e.policyMap
+}
+
 func (e *Endpoint) GetReporter(name string) cell.Health {
 	if e.reporterScope == nil {
 		_, h := cell.NewSimpleHealth()
@@ -1077,6 +1081,12 @@ func (e UpdateStateChangeError) Error() string { return e.msg }
 // or if endpoint regeneration was unable to be triggered. Note that the
 // LabelConfiguration in the EndpointConfigurationSpec is *not* consumed here.
 func (e *Endpoint) Update(cfg *models.EndpointConfigurationSpec) error {
+	scoppedLogger := e.getLogger().WithFields(logrus.Fields{
+		logfields.EndpointID:   e.ID,
+		logfields.K8sPodName:   e.K8sPodName,
+		logfields.K8sNamespace: e.K8sNamespace,
+		"traceFunction93":      "Endpoint.Update",
+	})
 	om, err := EndpointMutableOptionLibrary.ValidateConfigurationMap(cfg.Options)
 	if err != nil {
 		return UpdateValidationError{err.Error()}
@@ -1127,6 +1137,7 @@ func (e *Endpoint) Update(cfg *models.EndpointConfigurationSpec) error {
 				}
 				if regen {
 					e.Regenerate(regenCtx)
+					scoppedLogger.Info("Endpoint regeneration triggered")
 					return nil
 				}
 			case <-timeout:

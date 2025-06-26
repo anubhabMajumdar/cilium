@@ -330,6 +330,15 @@ func (m *endpointCreationManager) DebugStatus() (output string) {
 // createEndpoint attempts to create the endpoint corresponding to the change
 // request that was specified.
 func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, epTemplate *models.EndpointChangeRequest) (*endpoint.Endpoint, int, error) {
+	scoppedLogger := log.WithFields(logrus.Fields{
+		logfields.ContainerID:        epTemplate.ContainerID,
+		logfields.ContainerInterface: epTemplate.ContainerInterfaceName,
+		logfields.K8sPodName:         epTemplate.K8sNamespace + "/" + epTemplate.K8sPodName,
+		logfields.K8sUID:             epTemplate.K8sUID,
+		logfields.Interface:          epTemplate.InterfaceName,
+		logfields.Labels:             epTemplate.Labels,
+		"traceFunction93":            "cmd.createEndpoint",
+	})
 	if option.Config.EnableEndpointRoutes {
 		if epTemplate.DatapathConfiguration == nil {
 			epTemplate.DatapathConfiguration = &models.EndpointDatapathConfiguration{}
@@ -362,7 +371,7 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
 		epTemplate.DatapathConfiguration.RequireRouting = &disabled
 	}
 
-	log.WithFields(logrus.Fields{
+	scoppedLogger.WithFields(logrus.Fields{
 		"addressing":                 epTemplate.Addressing,
 		logfields.ContainerID:        epTemplate.ContainerID,
 		logfields.ContainerInterface: epTemplate.ContainerInterfaceName,
@@ -387,6 +396,15 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
 	ep, err := endpoint.NewEndpointFromChangeModel(d.ctx, owner, d, d.ipcache, d.l7Proxy, d.identityAllocator, d.ctMapGC, epTemplate)
 	if err != nil {
 		return invalidDataError(ep, fmt.Errorf("unable to parse endpoint parameters: %w", err))
+	}
+	if m := ep.GetPolicyMap(); m == nil {
+		scoppedLogger.WithField(logfields.EndpointID, ep.ID).Warning("Endpoint has no policy map")
+	} else {
+		if pm, err := m.Dump(); err != nil {
+			scoppedLogger.WithError(err).WithField(logfields.EndpointID, ep.ID).Warning("Unable to dump policy map")
+		} else {
+			scoppedLogger.WithField("Policy map", pm).Info("Policy map dump just after NewEndpointFromChangeModel")
+		}
 	}
 
 	oldEp := d.endpointManager.LookupCiliumID(ep.ID)
@@ -542,6 +560,16 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
 	default:
 	}
 
+	if m := ep.GetPolicyMap(); m == nil {
+		scoppedLogger.WithField(logfields.EndpointID, ep.ID).Warning("Endpoint has no policy map")
+	} else {
+		if pm, err := m.Dump(); err != nil {
+			scoppedLogger.WithError(err).WithField(logfields.EndpointID, ep.ID).Warning("Unable to dump policy map")
+		} else {
+			scoppedLogger.WithField("Policy map", pm).Info("Policy map dump just before Regerate")
+		}
+	}
+
 	if !regenTriggered {
 		regenMetadata := &regeneration.ExternalRegenerationMetadata{
 			Reason:            "Initial build on endpoint creation",
@@ -554,6 +582,7 @@ func (d *Daemon) createEndpoint(ctx context.Context, owner regeneration.Owner, e
 		}
 		if build {
 			ep.Regenerate(regenMetadata)
+			scoppedLogger.WithField(logfields.EndpointID, ep.ID).Info("Endpoint regeneration triggered")
 		}
 	}
 
@@ -669,6 +698,14 @@ func validPatchTransitionState(state *models.EndpointState) bool {
 
 func patchEndpointIDHandler(d *Daemon, params PatchEndpointIDParams) middleware.Responder {
 	scopedLog := log.WithField(logfields.Params, logfields.Repr(params))
+	scopedLog = scopedLog.WithFields(logrus.Fields{
+		logfields.EndpointID:  params.ID,
+		logfields.ContainerID: params.Endpoint.ContainerID,
+		logfields.Interface:   params.Endpoint.InterfaceName,
+		logfields.K8sPodName:  params.Endpoint.K8sNamespace + "/" + params.Endpoint.K8sPodName,
+		logfields.K8sUID:      params.Endpoint.K8sUID,
+		"traceFunction93":     "cmd.patchEndpointIDHandler",
+	})
 	if ep := params.Endpoint; ep != nil {
 		scopedLog = scopedLog.WithField("endpoint", logfields.Repr(*ep))
 	}
@@ -742,6 +779,7 @@ func patchEndpointIDHandler(d *Daemon, params PatchEndpointIDParams) middleware.
 			Reason:            reason,
 			RegenerationLevel: regeneration.RegenerateWithDatapath,
 		}
+		scopedLog.WithField("reason", regenMetadata.Reason).Info("Regenerating endpoint due to patch request")
 		if !<-ep.Regenerate(regenMetadata) {
 			err := api.Error(PatchEndpointIDFailedCode,
 				fmt.Errorf("error while regenerating endpoint."+

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 
 	cilium "github.com/cilium/proxy/go/cilium/api"
+	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/cilium/cilium/api/v1/models"
@@ -854,28 +855,60 @@ func wildcardRule(lbls labels.LabelArray, ingress bool) *rule {
 // known to not affect the given identity. Pass a skipRevision of 0 to force
 // calculation.
 func (r *Repository) GetSelectorPolicy(id *identity.Identity, skipRevision uint64, stats GetPolicyStatistics) (SelectorPolicy, uint64, error) {
+	scoppedLogger := log.WithFields(logrus.Fields{
+		logfields.Identity: id.StringID(),
+		"SkipRevision":     skipRevision,
+		"labels":           id.Labels.String(),
+		"traceFunction93":  "policy.GetSelectorPolicy",
+		"traceID":          "coredns-" + id.StringID(),
+	})
+
 	stats.WaitingForPolicyRepository().Start()
+	// scoppedLogger.Info("Waiting for policy repository lock to compute selector policy")
+
 	r.RLock()
 	defer r.RUnlock()
 	stats.WaitingForPolicyRepository().End(true)
+	scoppedLogger.Info("Acquired policy repository lock to compute selector policy")
 
 	rev := r.GetRevision()
+	// scoppedLogger.WithField("revision", rev).WithField("skipRevision", skipRevision).Info("Computing selector policy")
 
 	// Do we already have a given revision?
 	// If so, skip calculation.
 	if skipRevision >= rev {
+		scoppedLogger.WithField("revision", rev).WithField("skipRevision", skipRevision).Debug("Skipping selector policy calculation, already computed")
 		return nil, rev, nil
 	}
 
 	stats.PolicyCalculation().Start()
+	// scoppedLogger.Info("Calculating selector policy")
+
 	// This may call back in to the (locked) repository to generate the
 	// selector policy
 	sp, updated, err := r.policyCache.updateSelectorPolicy(id)
+	if err != nil {
+		scoppedLogger.WithError(err).Error("Failed to compute selector policy")
+	}
 	stats.PolicyCalculation().EndError(err)
 
 	// If we hit cache, reset the statistics.
 	if !updated {
+		scoppedLogger.WithField("revision", rev).WithField("skipRevision", skipRevision).Info("Selector policy already computed, reset")
 		stats.PolicyCalculation().Reset()
+	}
+
+	// Log the distilled policy.
+	if sp != nil {
+		for _, item := range sp.L4Policy.GetModel().Ingress {
+			scoppedLogger.WithField("ingress", item.Rule).Info("Computed ingress L4 rule")
+		}
+		// Log egress rules
+		for _, item := range sp.L4Policy.GetModel().Egress {
+			scoppedLogger.WithField("egress", item.Rule).Info("Computed egress L4 rule")
+		}
+	} else {
+		scoppedLogger.WithField("revision", rev).Info("No selector policy computed, returning nil")
 	}
 
 	return sp, rev, nil

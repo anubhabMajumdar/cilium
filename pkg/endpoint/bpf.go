@@ -377,6 +377,13 @@ func (e *Endpoint) removeOldRedirects(desiredRedirects, realizedRedirects map[st
 // Whether the new state dir is populated with all new BPF state files,
 // and an error if something failed.
 func (e *Endpoint) regenerateBPF(regenContext *regenerationContext) (revnum uint64, reterr error) {
+	scoppedLogger := e.getLogger().WithFields(logrus.Fields{
+		logfields.EndpointID: e.StringID(),
+		"traceFunction93":    "endpoint.regenerateBPF",
+		"traceID":            "coredns-" + e.SecurityIdentity.StringID(),
+	})
+	scoppedLogger.Info("Regenerating BPF for endpoint")
+
 	var err error
 
 	stats := &regenContext.Stats
@@ -503,7 +510,16 @@ func (e *Endpoint) regenerateBPF(regenContext *regenerationContext) (revnum uint
 
 	e.ctCleaned = true
 
+	scoppedLogger.WithField("policyMapSyncDone", datapathRegenCtxt.policyMapSyncDone).Info("Policy map sync done value")
 	if !datapathRegenCtxt.policyMapSyncDone {
+		scoppedLogger.WithField("policyMapDump", datapathRegenCtxt.policyMapDump).
+			WithFields(logrus.Fields{
+				"desiredPolicyRevision":  e.desiredPolicy.Revision,
+				"realizedPolicyRevision": e.realizedPolicy.Revision,
+			}).
+			WithField("desiredPolicy", e.desiredPolicy.String()).
+			WithField("realizedPolicy", e.realizedPolicy.String()).
+			Info("Syncing policy map with realized policy")
 		err = e.policyMapSync(datapathRegenCtxt.policyMapDump, stats)
 		if err != nil {
 			return 0, fmt.Errorf("unable to regenerate policy because PolicyMap synchronization failed: %w", err)
@@ -532,16 +548,28 @@ func (e *Endpoint) regenerateBPF(regenContext *regenerationContext) (revnum uint
 // Sync is done against 'policyMapDump' if non-empty, otherwise it is done against e.realizedPolicy
 // e.mutex must be held!
 func (e *Endpoint) policyMapSync(policyMapDump policy.MapStateMap, stats *regenerationStatistics) (err error) {
+	scoppedLogger := e.getLogger().WithFields(logrus.Fields{
+		logfields.EndpointID: e.StringID(),
+		"traceFunction93":    "endpoint.policyMapSync",
+		"traceID":            "coredns-" + e.SecurityIdentity.StringID(),
+		"realizedPolicy":     e.realizedPolicy.String(),
+		"desiredPolicy":      e.desiredPolicy.String(),
+	})
+	scoppedLogger.Info("Syncing policy map")
+
 	stats.mapSync.Start()
 	// Nothing to do if the desired policy is already fully realized.
 	if e.realizedPolicy != e.desiredPolicy {
 		if len(policyMapDump) > 0 {
 			_, _, err = e.syncPolicyMapWith(policyMapDump, false)
+			scoppedLogger.WithField("policyMapDump", policyMapDump).Info("Syncing policy map with provided dump")
 		} else {
 			err = e.syncPolicyMap()
+			scoppedLogger.Info("Syncing policy map with realized policy")
 		}
 	}
 	stats.mapSync.End(err == nil)
+	scoppedLogger.WithError(err).Info("Policy map sync done")
 	return err
 }
 
@@ -591,6 +619,12 @@ func (e *Endpoint) realizeBPFState(regenContext *regenerationContext) (err error
 //
 // Returns whether the headerfile changed and/or an error.
 func (e *Endpoint) runPreCompilationSteps(regenContext *regenerationContext) (preCompilationError error) {
+	scoppedLogger := e.getLogger().WithFields(logrus.Fields{
+		logfields.EndpointID: e.StringID(),
+		"traceFunction93":    "endpoint.runPreCompilationSteps",
+		"traceID":            "coredns-" + e.SecurityIdentity.StringID(),
+	})
+
 	stats := &regenContext.Stats
 	datapathRegenCtxt := regenContext.datapathRegenerationContext
 
@@ -606,6 +640,7 @@ func (e *Endpoint) runPreCompilationSteps(regenContext *regenerationContext) (pr
 	// lock the endpoint, read our values, then unlock
 	err := e.lockAlive()
 	if err != nil {
+		scoppedLogger.WithError(err).Error("Unable to lock endpoint for regeneration")
 		return err
 	}
 	identityRevision := e.identityRevision
@@ -625,9 +660,16 @@ func (e *Endpoint) runPreCompilationSteps(regenContext *regenerationContext) (pr
 		err := e.regeneratePolicy(stats, datapathRegenCtxt)
 		stats.policyCalculation.End(err == nil)
 		if err != nil {
+			scoppedLogger.WithError(err).Error("Unable to regenerate policy")
 			return fmt.Errorf("unable to regenerate policy for '%s': %w", e.StringID(), err)
 		}
 	}
+
+	scoppedLogger.WithFields(logrus.Fields{
+		"endpointPolicy":   datapathRegenCtxt.policyResult.endpointPolicy,
+		"identityRevision": identityRevision,
+		"policyRevision":   policyRevision,
+	}).Info("Computed endpoint policy using regeneratePolicy")
 
 	// Any possible DNS redirects had their rules updated by 'e.regeneratePolicy' above, so we
 	// can get the new DNS rules for restoration now, before we take the endpoint lock below.
@@ -639,6 +681,7 @@ func (e *Endpoint) runPreCompilationSteps(regenContext *regenerationContext) (pr
 	err = e.lockAlive()
 	stats.waitingForLock.End(err == nil)
 	if err != nil {
+		scoppedLogger.WithError(err).Error("Unable to lock endpoint for regeneration")
 		return err
 	}
 
@@ -673,6 +716,7 @@ func (e *Endpoint) runPreCompilationSteps(regenContext *regenerationContext) (pr
 	// where an unnecessary policy computation was skipped. In that case
 	// e.desiredPolicy == e.realizedPolicy also after this call.
 	if err := e.setDesiredPolicy(datapathRegenCtxt); err != nil {
+		scoppedLogger.WithError(err).Error("Unable to set desired policy")
 		return err
 	}
 	// Mark the new desired policy as ready when done before the lock is released
@@ -729,6 +773,7 @@ func (e *Endpoint) runPreCompilationSteps(regenContext *regenerationContext) (pr
 
 		if e.isProperty(PropertyFakeEndpoint) {
 			if err = e.writeHeaderfile(nextDir); err != nil {
+				scoppedLogger.WithError(err).Error("Unable to write header file for fake endpoint")
 				return fmt.Errorf("Unable to write header file: %w", err)
 			}
 		}
@@ -738,26 +783,52 @@ func (e *Endpoint) runPreCompilationSteps(regenContext *regenerationContext) (pr
 	if e.policyMap == nil {
 		e.policyMap, err = policymap.OpenOrCreate(e.policyMapPath())
 		if err != nil {
+			scoppedLogger.WithError(err).Error("Unable to open or create policy map")
 			return err
 		}
 	}
 
 	// Collect a dump of the bpf policymap if needed for the sync.
+	scoppedLogger.WithFields(logrus.Fields{
+		"realizedPolicy": e.realizedPolicy.String(),
+		"desiredPolicy":  e.desiredPolicy.String(),
+		"empty":          e.realizedPolicy.Empty(),
+	}).Info("Dumping policy map before sync")
 	if e.realizedPolicy != e.desiredPolicy && e.realizedPolicy.Empty() {
 		datapathRegenCtxt.policyMapDump, err = e.dumpPolicyMapToMapStateMap()
 		if err != nil {
+			scoppedLogger.WithError(err).Error("Unable to dump policy map")
 			return fmt.Errorf("policymap dump failed: %w", err)
 		}
+
+		scoppedLogger.WithField("policyMapDump", datapathRegenCtxt.policyMapDump).
+			WithField("logfields.PolicyMapDumpSize", len(datapathRegenCtxt.policyMapDump)).
+			Info("Dumped policy map before sync")
 
 		// Sync policy map before bpf compilation if the bpf policymap is empty.
 		// This allows for upgrades and downgrades from versions using a different policy map
 		if len(datapathRegenCtxt.policyMapDump) == 0 {
+			scoppedLogger.Info("Syncing policy map before bpf compilation")
 			err = e.policyMapSync(nil, stats)
 			if err != nil {
+				scoppedLogger.WithError(err).Error("Unable to sync policy map before bpf compilation")
 				return fmt.Errorf("policymap synchronization failed: %w", err)
 			}
+			datapathRegenCtxt.policyMapSyncDone = true // Anubhab fixed bug here hopefully.
+		} else {
+			// There is an edge case where on startup, the policy map for an endpoint
+			// is not empty (policyMapDump > 0). If the code has reached here, it means:
+			// 1. The endpoint has a policy map that is not empty.
+			// 2. No policies has been realized (realized policy is empty), and
+			// 3. New policies need to be applied for this endpoint (hence desiredPolicy != realizedPolicy).
+			// In this case we need to add the desired policies to the policy map dump of regenerationContext
+			// so that the policies are applied after bpf compilation.
+			// GH-37724: https://github.com/cilium/cilium/issues/37724
+			datapathRegenCtxt.policyMapSyncDone = false
+			datapathRegenCtxt.policyMapDump = nil // Reset the dump so that it is not used later.
+			scoppedLogger.Info("Policy map dump is not empty, will sync policy map after bpf compilation")
 		}
-		datapathRegenCtxt.policyMapSyncDone = true
+
 	}
 
 	// sync policy map for fake endpoints, bpf compilation will be skipped for them.
