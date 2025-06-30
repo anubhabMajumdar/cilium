@@ -25,6 +25,8 @@ import (
 	"github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/rate"
 	"github.com/cilium/cilium/pkg/time"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Cilium network policy can refer to Kubernetes services via 'ToServices'.
@@ -164,8 +166,8 @@ func serviceEventStream(db *statedb.DB, services statedb.Table[*loadbalancer.Ser
 
 // onServiceEvent processes a ServiceNotification and (if necessary)
 // recalculates all policies affected by this change.
-func (p *policyWatcher) onServiceEvent(event serviceEvent) {
-	err := p.updateToServicesPolicies(event)
+func (p *policyWatcher) onServiceEvent(ctx context.Context, event serviceEvent) {
+	err := p.updateToServicesPolicies(ctx, event)
 	if err != nil {
 		p.log.Warn(
 			"Failed to recalculate CiliumNetworkPolicy rules after service event",
@@ -179,7 +181,23 @@ func (p *policyWatcher) onServiceEvent(event serviceEvent) {
 // added, removed, its endpoints have changed, or its labels have changed).
 // This function then checks if any of the known CNP/CCNPs are affected by this
 // change, and recomputes them by calling resolveCiliumNetworkPolicyRefs.
-func (p *policyWatcher) updateToServicesPolicies(ev serviceEvent) error {
+func (p *policyWatcher) updateToServicesPolicies(ctx context.Context, ev serviceEvent) error {
+	_, span := tracer.Start(ctx, "policyWatcher.updateToServicesPolicies")
+	defer span.End()
+	attr := []attribute.KeyValue{
+		attribute.String("k8s.service.name", ev.name.Name),
+		attribute.String("k8s.service.namespace", ev.name.Namespace),
+		attribute.Bool("k8s.service.deleted", ev.deleted),
+	}
+	span.SetAttributes(attr...)
+	logger.InfoContext(ctx, "Processing service event",
+		"serviceName", ev.name.Name,
+		"serviceNamespace", ev.name.Namespace,
+		"serviceDeleted", ev.deleted,
+		"serviceLabels", ev.labels,
+		"serviceSelector", ev.selector,
+		"serviceBackendRevisions", ev.backendRevisions,
+	)
 	var errs []error
 
 	// candidatePolicyKeys contains the set of policy names we need to process
@@ -226,7 +244,7 @@ func (p *policyWatcher) updateToServicesPolicies(ev serviceEvent) error {
 
 		resourceID := resourceIDForCiliumNetworkPolicy(key, cnp)
 
-		errs = append(errs, p.resolveCiliumNetworkPolicyRefs(cnp, key, initialRecvTime, resourceID, nil))
+		errs = append(errs, p.resolveCiliumNetworkPolicyRefs(ctx, cnp, key, initialRecvTime, resourceID, nil))
 	}
 	return errors.Join(errs...)
 }

@@ -35,6 +35,9 @@ import (
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/time"
+
+	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"go.opentelemetry.io/otel"
 )
 
 var (
@@ -817,6 +820,27 @@ func (mgr *endpointManager) WaitForEndpointsAtPolicyRev(ctx context.Context, rev
 // EndpointExists returns whether the endpoint with id exists.
 func (mgr *endpointManager) EndpointExists(id uint16) bool {
 	return mgr.LookupCiliumID(id) != nil
+}
+
+const name = "go.cilium.io/pkg/endpointManager"
+
+var (
+	tracer = otel.Tracer(name)
+	meter  = otel.Meter(name)
+	logger = otelslog.NewLogger(name)
+	// rollCnt metric.Int64Counter
+)
+
+func (mgr *endpointManager) UpdatePolicyTrace(ctx context.Context, idsToRegen *set.Set[identity.NumericIdentity], fromRev, toRev uint64) {
+	_, span := tracer.Start(ctx, "UpdatePolicy")
+	defer span.End()
+
+	logger.InfoContext(ctx, "Updating policy for endpoints",
+		"idsToRegen", idsToRegen,
+		"fromRev", fromRev,
+		"toRev", toRev,
+	)
+	mgr.UpdatePolicy(idsToRegen, fromRev, toRev)
 }
 
 // UpdatePolicy triggers policy updates for all live endpoints.

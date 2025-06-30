@@ -24,6 +24,19 @@ import (
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/option"
 	policycell "github.com/cilium/cilium/pkg/policy/cell"
+
+	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
+)
+
+const name = "go.cilium.io/pkg/policy/k8s"
+
+var (
+	tracer  = otel.Tracer(name)
+	meter   = otel.Meter(name)
+	logger  = otelslog.NewLogger(name)
+	rollCnt metric.Int64Counter
 )
 
 type policyWatcher struct {
@@ -177,6 +190,18 @@ func (p *policyWatcher) watchResources(ctx context.Context) {
 				}
 				event.Done(err)
 			case event, ok := <-cnpEvents:
+				tracectx, span := tracer.Start(context.Background(), "policyWatcher.watchResources.cnpEvents")
+				defer span.End()
+
+				// attr := []attribute.KeyValue{
+				// 	attribute.String("k8s.networkpolicy.name", event.Object.Name),
+				// 	attribute.String("k8s.networkpolicy.namespace", event.Object.Namespace),
+				// 	attribute.String("k8s.networkpolicy.apiVersion", event.Object.APIVersion),
+				// }
+				// span.SetAttributes(attr...)
+
+				logger.InfoContext(tracectx, "Processing K8s NetworkPolicy")
+
 				if !ok {
 					cnpEvents = nil
 					break
@@ -203,16 +228,29 @@ func (p *policyWatcher) watchResources(ctx context.Context) {
 					slimCNP.ObjectMeta.Namespace,
 					slimCNP.ObjectMeta.Name,
 				)
+				logger.InfoContext(tracectx, "Processing CiliumNetworkPolicy")
 				var err error
 				switch event.Kind {
 				case resource.Upsert:
-					err = p.onUpsert(slimCNP, event.Key, k8sAPIGroupCiliumNetworkPolicyV2, resourceID, cnpDone)
+					err = p.onUpsert(tracectx, slimCNP, event.Key, k8sAPIGroupCiliumNetworkPolicyV2, resourceID, cnpDone)
 				case resource.Delete:
 					p.onDelete(slimCNP, event.Key, k8sAPIGroupCiliumNetworkPolicyV2, resourceID, cnpDone)
 				}
 				reportCNPChangeMetrics(err)
 				event.Done(err)
 			case event, ok := <-ccnpEvents:
+				tracectx, span := tracer.Start(context.Background(), "policyWatcher.watchResources.ccnpEvents")
+				defer span.End()
+
+				// attr := []attribute.KeyValue{
+				// 	attribute.String("k8s.networkpolicy.name", event.Object.Name),
+				// 	attribute.String("k8s.networkpolicy.namespace", event.Object.Namespace),
+				// 	attribute.String("k8s.networkpolicy.apiVersion", event.Object.APIVersion),
+				// }
+				// span.SetAttributes(attr...)
+
+				logger.InfoContext(tracectx, "Processing K8s CiliumNetworkPolicy")
+
 				if !ok {
 					ccnpEvents = nil
 					break
@@ -242,7 +280,7 @@ func (p *policyWatcher) watchResources(ctx context.Context) {
 				var err error
 				switch event.Kind {
 				case resource.Upsert:
-					err = p.onUpsert(slimCNP, event.Key, k8sAPIGroupCiliumClusterwideNetworkPolicyV2, resourceID, ccnpDone)
+					err = p.onUpsert(tracectx, slimCNP, event.Key, k8sAPIGroupCiliumClusterwideNetworkPolicyV2, resourceID, ccnpDone)
 				case resource.Delete:
 					p.onDelete(slimCNP, event.Key, k8sAPIGroupCiliumClusterwideNetworkPolicyV2, resourceID, ccnpDone)
 				}
@@ -269,11 +307,26 @@ func (p *policyWatcher) watchResources(ctx context.Context) {
 				event.Done(nil)
 
 			case event, ok := <-serviceEvents:
+				tracectx, span := tracer.Start(context.Background(), "policyWatcher.watchResources.serviceEvents")
+				defer span.End()
+
+				// attr := []attribute.KeyValue{
+				// 	attribute.String("k8s.service.name", event.getName()),
+				// 	attribute.String("k8s.service.namespace", event.getNamespace()),
+				// }
+				// span.SetAttributes(attr...)
+
+				logger.InfoContext(tracectx, "Processing K8s Service Events",
+					"name", event.getName(),
+					"namespace", event.getNamespace(),
+					"labels", event.getLabels(),
+				)
+
 				if !ok {
 					serviceEvents = nil
 					break
 				}
-				p.onServiceEvent(event)
+				p.onServiceEvent(tracectx, event)
 			}
 
 			if knpEvents == nil && cnpEvents == nil && ccnpEvents == nil && cidrGroupEvents == nil && serviceEvents == nil {

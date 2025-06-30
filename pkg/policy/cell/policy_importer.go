@@ -29,6 +29,12 @@ import (
 	policytypes "github.com/cilium/cilium/pkg/policy/types"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/time"
+
+	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type PolicyImporter interface {
@@ -101,7 +107,37 @@ func newPolicyImporter(cfg policyImporterParams) PolicyImporter {
 // (This is only used for policies created by the local API).
 const ResourceIDAnonymous = "policy/anonymous"
 
+const name = "go.cilium.io/pkg/policy/cell"
+
+var (
+	tracer  = otel.Tracer(name)
+	meter   = otel.Meter(name)
+	logger  = otelslog.NewLogger(name)
+	rollCnt metric.Int64Counter
+)
+
 func (i *policyImporter) UpdatePolicy(u *policytypes.PolicyUpdate) {
+	if u.ParentCtx == nil {
+		u.ParentCtx = context.Background()
+	}
+	_, span := tracer.Start(u.ParentCtx, "policy.UpdatePolicy")
+	defer span.End()
+
+	attr := []attribute.KeyValue{
+		attribute.String("resource", string(u.Resource)),
+		attribute.Int("rule.count", len(u.Rules)),
+		attribute.String("source", string(u.Source)),
+		attribute.String("processing.start_time", u.ProcessingStartTime.Format(time.RFC3339)),
+	}
+	span.SetAttributes(attr...)
+
+	logger.InfoContext(u.ParentCtx, "Queuing policy update",
+		logfields.Resource, u.Resource,
+		logfields.Count, len(u.Rules),
+		logfields.PolicyRevision, u.ProcessingStartTime,
+		logfields.Source, u.Source,
+	)
+
 	i.q <- u
 }
 
@@ -265,11 +301,19 @@ func (i *policyImporter) prunePrefixes(prunePrefixes map[ipcachetypes.ResourceID
 // CIDR identities.
 // (Does not actually return error, just to satisfy the Job signature)
 func (i *policyImporter) processUpdates(ctx context.Context, updates []*policytypes.PolicyUpdate) error {
+	parentCtx, parentSpan := tracer.Start(ctx, "policy.processUpdates")
+	defer parentSpan.End()
+
+	attr := []attribute.KeyValue{
+		attribute.Int("update.count", len(updates)),
+	}
+	parentSpan.SetAttributes(attr...)
+
 	if len(updates) == 0 {
 		return nil
 	}
 
-	i.log.Info("Processing policy updates", logfields.Count, len(updates))
+	logger.InfoContext(parentCtx, "Processing policy updates", logfields.Count, len(updates))
 
 	// First, allocate local identities for all prefixes referenced by policies.
 	//
@@ -293,6 +337,16 @@ func (i *policyImporter) processUpdates(ctx context.Context, updates []*policyty
 	endRevision := startRevision
 	var oldRuleCnt int
 	for _, upd := range updates {
+		childCtx, span := tracer.Start(upd.ParentCtx,
+			"policy.applyUpdate",
+			trace.WithAttributes(attribute.String("parentSpanTraceID", parentSpan.SpanContext().TraceID().String())),
+		)
+		logger.InfoContext(childCtx, "Applying policy update",
+			logfields.Resource, upd.Resource,
+			logfields.Count, len(upd.Rules),
+			logfields.PolicyRevision, endRevision,
+			logfields.Source, upd.Source,
+		)
 		var regen *set.Set[identity.NumericIdentity]
 
 		// The standard case: we have an owning resource, either a k8s object
@@ -315,12 +369,12 @@ func (i *policyImporter) processUpdates(ctx context.Context, updates []*policyty
 			if len(upd.Rules) == 0 && len(replaceLabels) == 0 {
 				// No rules, no resource, no labels. This means we should clear all policies.
 				// Add an empty label selector
-				i.log.Info("Policy replace request with no labels, deleting all policies!")
+				logger.InfoContext(childCtx, "Policy replace request with no labels, deleting all policies!")
 				replaceLabels = append(replaceLabels, labels.LabelArray{})
 			}
 
 			if len(replaceLabels) >= 0 {
-				i.log.Info("Replacing policy by labels",
+				logger.InfoContext(childCtx, "Replacing policy by labels",
 					logfields.Labels, replaceLabels,
 					logfields.Count, len(upd.Rules),
 				)
@@ -329,19 +383,28 @@ func (i *policyImporter) processUpdates(ctx context.Context, updates []*policyty
 		}
 
 		if len(upd.Rules) == 0 {
-			i.log.Info("Deleted policy from repository",
+			logger.InfoContext(childCtx, "Deleted policy from repository",
 				logfields.Resource, upd.Resource,
 				logfields.PolicyRevision, endRevision,
 				logfields.DeletedRules, oldRuleCnt,
 				logfields.Identity, slices.Collect(truncate(regen.Members(), 100)))
 		} else {
-			i.log.Info("Upserted policy to repository",
+			logger.InfoContext(childCtx, "Upserted policy to repository",
 				logfields.Resource, upd.Resource,
 				logfields.PolicyRevision, endRevision,
 				logfields.DeletedRules, oldRuleCnt,
 				logfields.Identity, slices.Collect(truncate(regen.Members(), 100)))
 
 		}
+
+		logger.InfoContext(childCtx, "Policy update applied",
+			logfields.Resource, upd.Resource,
+			logfields.PolicyRevision, endRevision,
+			logfields.Count, len(upd.Rules),
+			logfields.Identity, slices.Collect(truncate(regen.Members(), 100)),
+			logfields.Source, upd.Source,
+			"ids_to_regen", regen.String(),
+		)
 
 		idsToRegen.Merge(*regen)
 
@@ -376,14 +439,15 @@ func (i *policyImporter) processUpdates(ctx context.Context, updates []*policyty
 
 			err := i.monitorAgent.SendEvent(monitorapi.MessageTypeAgent, msg)
 			if err != nil {
-				i.log.Error("Failed to send policy update as monitor notification", logfields.Error, err)
+				logger.ErrorContext(childCtx, "Failed to send policy update as monitor notification", logfields.Error, err)
 			}
 		}
+		span.End()
 	}
 
 	// All policy updates have been applied; regenerate all affected endpoints.
 	// Unaffected endpoints can merely have their policy revision set.
-	i.log.Info("Policy repository updates complete, triggering endpoint updates",
+	logger.InfoContext(parentCtx, "Policy repository updates complete, triggering endpoint updates",
 		logfields.PolicyRevision, endRevision)
 	if i.epm != nil {
 		i.epm.UpdatePolicy(idsToRegen, startRevision, endRevision)

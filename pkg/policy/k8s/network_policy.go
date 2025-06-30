@@ -4,6 +4,8 @@
 package k8s
 
 import (
+	"context"
+
 	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
 	"github.com/cilium/cilium/pkg/k8s"
 	slim_networkingv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/networking/v1"
@@ -12,7 +14,28 @@ import (
 	"github.com/cilium/cilium/pkg/metrics"
 	policytypes "github.com/cilium/cilium/pkg/policy/types"
 	"github.com/cilium/cilium/pkg/source"
+	"go.opentelemetry.io/otel/attribute"
 )
+
+func (p *policyWatcher) addK8sNetworkPolicyV1Trace(ctx context.Context, k8sNP *slim_networkingv1.NetworkPolicy, apiGroup string, dc chan uint64, clusterName string) error {
+	_, span := tracer.Start(ctx, "addK8sNetworkPolicyV1")
+	defer span.End()
+	attr := []attribute.KeyValue{
+		attribute.String("k8s.networkpolicy.name", k8sNP.ObjectMeta.Name),
+		attribute.String("k8s.networkpolicy.namespace", k8sNP.ObjectMeta.Namespace),
+		attribute.String("k8s.networkpolicy.apiVersion", k8sNP.TypeMeta.APIVersion),
+	}
+	span.SetAttributes(attr...)
+
+	logger.InfoContext(ctx, "Processing K8s NetworkPolicy",
+		"kind", k8sNP.TypeMeta.Kind,
+		"name", k8sNP.ObjectMeta.Name,
+		"namespace", k8sNP.ObjectMeta.Namespace,
+		"apiVersion", k8sNP.TypeMeta.APIVersion,
+	)
+
+	return p.addK8sNetworkPolicyV1(k8sNP, apiGroup, dc, clusterName)
+}
 
 func (p *policyWatcher) addK8sNetworkPolicyV1(k8sNP *slim_networkingv1.NetworkPolicy, apiGroup string, dc chan uint64, clusterName string) error {
 	defer func() {

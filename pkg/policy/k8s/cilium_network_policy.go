@@ -17,15 +17,33 @@ import (
 	policytypes "github.com/cilium/cilium/pkg/policy/types"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/time"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func (p *policyWatcher) onUpsert(
+	ctx context.Context,
 	cnp *types.SlimCNP,
 	key resource.Key,
 	apiGroup string,
 	resourceID ipcacheTypes.ResourceID,
 	dc chan uint64,
 ) error {
+	_, span := tracer.Start(ctx, "onUpsertCiliumNetworkPolicy")
+	defer span.End()
+
+	attr := []attribute.KeyValue{
+		attribute.String("k8s.cnp.name", cnp.ObjectMeta.Name),
+		attribute.String("k8s.cnp.namespace", cnp.ObjectMeta.Namespace),
+		attribute.String("k8s.cnp.apiVersion", cnp.TypeMeta.APIVersion),
+	}
+	span.SetAttributes(attr...)
+	logger.InfoContext(ctx, "Processing CiliumNetworkPolicy",
+		"kind", cnp.TypeMeta.Kind,
+		"name", cnp.ObjectMeta.Name,
+		"namespace", cnp.ObjectMeta.Namespace,
+		"apiVersion", cnp.TypeMeta.APIVersion,
+	)
+
 	initialRecvTime := time.Now()
 
 	defer func() {
@@ -42,7 +60,8 @@ func (p *policyWatcher) onUpsert(
 			return nil
 		}
 
-		p.log.Debug(
+		logger.InfoContext(
+			ctx,
 			"Modified CiliumNetworkPolicy",
 			logfields.K8sAPIVersion, cnp.TypeMeta.APIVersion,
 			logfields.CiliumNetworkPolicyName, cnp.ObjectMeta.Name,
@@ -70,7 +89,7 @@ func (p *policyWatcher) onUpsert(
 		}
 	}
 
-	return p.resolveCiliumNetworkPolicyRefs(cnp, key, initialRecvTime, resourceID, dc)
+	return p.resolveCiliumNetworkPolicyRefs(ctx, cnp, key, initialRecvTime, resourceID, dc)
 }
 
 func (p *policyWatcher) onDelete(
@@ -99,6 +118,7 @@ func (p *policyWatcher) onDelete(
 // If the CNP was successfully imported, the raw (i.e. untranslated) CNP/CCNP
 // is also added to p.cnpCache.
 func (p *policyWatcher) resolveCiliumNetworkPolicyRefs(
+	ctx context.Context,
 	cnp *types.SlimCNP,
 	key resource.Key,
 	initialRecvTime time.Time,
@@ -115,7 +135,7 @@ func (p *policyWatcher) resolveCiliumNetworkPolicyRefs(
 		p.resolveToServices(key, translatedCNP)
 	}
 
-	err := p.upsertCiliumNetworkPolicyV2(translatedCNP, initialRecvTime, resourceID, dc)
+	err := p.upsertCiliumNetworkPolicyV2(ctx, translatedCNP, initialRecvTime, resourceID, dc)
 	if err == nil {
 		p.cnpCache[key] = cnp
 	}
@@ -123,11 +143,26 @@ func (p *policyWatcher) resolveCiliumNetworkPolicyRefs(
 	return err
 }
 
-func (p *policyWatcher) upsertCiliumNetworkPolicyV2(cnp *types.SlimCNP, initialRecvTime time.Time, resourceID ipcacheTypes.ResourceID, dc chan uint64) error {
+func (p *policyWatcher) upsertCiliumNetworkPolicyV2(ctx context.Context, cnp *types.SlimCNP, initialRecvTime time.Time, resourceID ipcacheTypes.ResourceID, dc chan uint64) error {
 	scopedLog := p.log.With(
 		logfields.CiliumNetworkPolicyName, cnp.ObjectMeta.Name,
 		logfields.K8sAPIVersion, cnp.TypeMeta.APIVersion,
 		logfields.K8sNamespace, cnp.ObjectMeta.Namespace,
+	)
+
+	_, span := tracer.Start(ctx, "upsertCiliumNetworkPolicyV2")
+	defer span.End()
+	attr := []attribute.KeyValue{
+		attribute.String("k8s.cnp.name", cnp.ObjectMeta.Name),
+		attribute.String("k8s.cnp.namespace", cnp.ObjectMeta.Namespace),
+		attribute.String("k8s.cnp.apiVersion", cnp.TypeMeta.APIVersion),
+	}
+	span.SetAttributes(attr...)
+	scopedLog.InfoContext(ctx, "Processing CiliumNetworkPolicy",
+		"kind", cnp.TypeMeta.Kind,
+		"name", cnp.ObjectMeta.Name,
+		"namespace", cnp.ObjectMeta.Namespace,
+		"apiVersion", cnp.TypeMeta.APIVersion,
 	)
 
 	scopedLog.Debug(
@@ -161,6 +196,7 @@ func (p *policyWatcher) upsertCiliumNetworkPolicyV2(cnp *types.SlimCNP, initialR
 		ProcessingStartTime: initialRecvTime,
 		Resource:            resourceID,
 		DoneChan:            dc,
+		ParentCtx:           ctx,
 	})
 	scopedLog.Info(
 		"Imported CiliumNetworkPolicy",

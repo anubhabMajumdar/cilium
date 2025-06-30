@@ -4,6 +4,7 @@
 package types
 
 import (
+	"context"
 	"time"
 
 	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
@@ -14,6 +15,7 @@ import (
 
 // PolicyUpdate is a proposed change to a policy in the PolicyRepository.
 type PolicyUpdate struct {
+	ParentCtx context.Context
 	// The set of rules to be added.
 	// Set to nil to delete for the given resource or labels.
 	Rules policyapi.Rules
