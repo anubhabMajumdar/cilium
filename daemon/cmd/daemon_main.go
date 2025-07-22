@@ -626,8 +626,14 @@ func InitGlobalFlags(logger *slog.Logger, cmd *cobra.Command, vp *viper.Viper) {
 	flags.Bool(option.ExternalEnvoyProxy, false, "whether the Envoy is deployed externally in form of a DaemonSet or not")
 	option.BindEnv(vp, option.ExternalEnvoyProxy)
 
-	flags.String(option.RoutingMode, defaults.RoutingMode, fmt.Sprintf("Routing mode (%q or %q)", option.RoutingModeNative, option.RoutingModeTunnel))
+	flags.String(option.RoutingMode, defaults.RoutingMode, fmt.Sprintf("Routing mode (%q, %q or %q)", option.RoutingModeNative, option.RoutingModeTunnel, option.RoutingModeHybrid))
 	option.BindEnv(vp, option.RoutingMode)
+
+	flags.String(option.SubnetTopologyFilePath, defaults.SubnetTopologyFilePath, "Path to the subnet topology file")
+	option.BindEnv(vp, option.SubnetTopologyFilePath)
+
+	flags.String(option.SubnetTopologyFileName, defaults.SubnetTopologyFileName, "Name of the subnet topology file")
+	option.BindEnv(vp, option.SubnetTopologyFileName)
 
 	flags.String(option.ServiceNoBackendResponse, defaults.ServiceNoBackendResponse, "Response to traffic for a service without backends")
 	option.BindEnv(vp, option.ServiceNoBackendResponse)

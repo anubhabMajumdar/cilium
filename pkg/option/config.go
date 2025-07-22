@@ -463,6 +463,10 @@ const (
 	// RoutingMode is the name of the option to choose between native routing and tunneling mode
 	RoutingMode = "routing-mode"
 
+	// SubnetTopology is the name of the option to provide a subnet topology
+	SubnetTopologyFilePath = "subnet-topology-path"
+	SubnetTopologyFileName = "subnet-topology-file-name"
+
 	// ServiceNoBackendResponse is the name of the option to pick how to handle traffic for services
 	// without any backends
 	ServiceNoBackendResponse = "service-no-backend-response"
@@ -1078,6 +1082,9 @@ const (
 
 	// RoutingModeTunnel specifies tunneling mode
 	RoutingModeTunnel = "tunnel"
+
+	// RoutingModeHybrid specifies hybrid routing mode
+	RoutingModeHybrid = "hybrid"
 )
 
 const (
@@ -1230,8 +1237,10 @@ type DaemonConfig struct {
 	EncryptInterface   []string // Set of network facing interface to encrypt over
 	EncryptNode        bool     // Set to true for encrypting node IP traffic
 
-	DatapathMode string // Datapath mode
-	RoutingMode  string // Routing mode
+	DatapathMode           string // Datapath mode
+	RoutingMode            string // Routing mode
+	SubnetTopologyFilePath string // Path to the file containing the node's subnets
+	SubnetTopologyFileName string // Name of the file containing the node's subnets
 
 	DryMode bool // Do not create BPF maps, devices, ..
 
@@ -2766,6 +2775,8 @@ func (c *DaemonConfig) Populate(logger *slog.Logger, vp *viper.Viper) {
 	c.TCFilterPriority = uint16(tcFilterPrio)
 
 	c.RoutingMode = vp.GetString(RoutingMode)
+	c.SubnetTopologyFilePath = vp.GetString(SubnetTopologyFilePath)
+	c.SubnetTopologyFileName = vp.GetString(SubnetTopologyFileName)
 
 	if vp.IsSet(AddressScopeMax) {
 		c.AddressScopeMax, err = ip.ParseScope(vp.GetString(AddressScopeMax))

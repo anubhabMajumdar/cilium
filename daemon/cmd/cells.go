@@ -35,6 +35,7 @@ import (
 	"github.com/cilium/cilium/pkg/driftchecker"
 	"github.com/cilium/cilium/pkg/dynamicconfig"
 	"github.com/cilium/cilium/pkg/dynamiclifecycle"
+	"github.com/cilium/cilium/pkg/dynamicsubnet"
 	"github.com/cilium/cilium/pkg/egressgateway"
 	endpoint "github.com/cilium/cilium/pkg/endpoint/cell"
 	"github.com/cilium/cilium/pkg/envoy"
@@ -328,6 +329,9 @@ var (
 
 		// Cilium Debuginfo API
 		debugapi.Cell,
+
+		// Dynamic subnet topology watcher
+		dynamicsubnet.Cell,
 	)
 )
 
