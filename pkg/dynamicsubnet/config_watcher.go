@@ -41,8 +41,9 @@ func NewConfigWatcher(params SubnetTopologyParams) error {
 		cm:             CIDRSubnetMapSingleton(params.MetricsRegistry),
 	}
 	cw.logger.Info("Config watcher created")
+	ctx, cancel := context.WithCancel(context.Background())
 	params.Lifecycle.Append(cell.Hook{
-		OnStart: func(ctx cell.HookContext) error {
+		OnStart: func(_ cell.HookContext) error {
 			cw.logger.Info("Initialing the ebpf map for subnet topology")
 			if err := cw.cm.createCIDRSubnetMap(); err != nil {
 				cw.logger.Error("Failed to create CIDR subnet map", logfields.Error, err)
@@ -50,17 +51,20 @@ func NewConfigWatcher(params SubnetTopologyParams) error {
 			}
 			cw.logger.Info("CIDR subnet map created successfully")
 			cw.logger.Info("Starting config watcher")
-			return cw.watch(ctx, 5*time.Second)
+			go cw.watch(ctx, 5*time.Second)
+			cw.logger.Info("Config watcher started", "interval", 5*time.Second)
+			return nil
 		},
-		OnStop: func(ctx cell.HookContext) error {
+		OnStop: func(_ cell.HookContext) error {
 			cw.logger.Info("Stopping config watcher")
+			cancel()
 			return nil
 		},
 	})
 	return nil
 }
 
-func (cw *configWatcher) watch(ctx context.Context, interval time.Duration) error {
+func (cw *configWatcher) watch(ctx context.Context, interval time.Duration) {
 	cw.logger.Info("Starting config watcher", "interval", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -68,7 +72,7 @@ func (cw *configWatcher) watch(ctx context.Context, interval time.Duration) erro
 		select {
 		case <-ctx.Done():
 			cw.logger.Info("Config watcher stopped")
-			return ctx.Err()
+			return
 		case <-ticker.C:
 			cw.reload()
 		}

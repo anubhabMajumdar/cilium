@@ -123,6 +123,10 @@ enum {
 				 * arg3: proxy port (in host byte order)
 				 */
 	DBG_SKIP_POLICY,	/**/
+	DBG_SUBNET_CHECK,	/* arg1: src_subnet_id
+				 * arg2: dst_subnet_id
+				 * arg3: same_subnet (bool)
+				 */
 };
 
 /* Capture types */

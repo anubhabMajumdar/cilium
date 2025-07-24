@@ -55,6 +55,7 @@
 #include "lib/nodeport.h"
 #include "lib/policy_log.h"
 #include "lib/vtep.h"
+#include "lib/subnet.h"
 
 /* Per-packet LB is needed if all LB cases can not be handled in bpf_sock.
  * Most services with L7 LB flag can not be redirected to their proxy port
@@ -493,12 +494,19 @@ static __always_inline int handle_ipv6_from_lxc(struct __ctx_buff *ctx, __u32 *d
 	 * so we can do this first.
 	 */
 	if (1) {
+		// Determine the source and destination subnet identities.
+		__u32 src_subnet = lookup_subnet_id(&ip6->saddr, AF_INET6);
+		__u32 dst_subnet = lookup_subnet_id(&ip6->daddr, AF_INET6);
+		bool same_subnet = (src_subnet == dst_subnet) && (src_subnet != 0);
+		// Log the same_subnet check for debugging using Cilium's debug mechanism
+		cilium_dbg3(ctx, DBG_SUBNET_CHECK, src_subnet, dst_subnet, same_subnet);
+
 		const union v6addr *daddr = (union v6addr *)&ip6->daddr;
 
 		info = lookup_ip6_remote_endpoint(daddr, 0);
 		if (info) {
 			*dst_sec_identity = info->sec_identity;
-			skip_tunnel = info->flag_skip_tunnel;
+			skip_tunnel = info->flag_skip_tunnel || (same_subnet);
 		} else {
 			*dst_sec_identity = WORLD_IPV6_ID;
 		}
@@ -928,11 +936,20 @@ static __always_inline int handle_ipv4_from_lxc(struct __ctx_buff *ctx, __u32 *d
 	hairpin_flow = ct_state_new.loopback;
 #endif /* ENABLE_PER_PACKET_LB */
 
+	// Determine the source and destination subnet identities.
+	__u32 src_subnet = lookup_subnet_id(&ip4->saddr, AF_INET);
+	__u32 dst_subnet = lookup_subnet_id(&ip4->daddr, AF_INET);
+	bool same_subnet = (src_subnet == dst_subnet) && (src_subnet != 0);
+	// Log the same_subnet check for debugging.
+	// Should be visible in trace_debug output.
+	// Log the same_subnet check for debugging using Cilium's debug mechanism
+	cilium_dbg3(ctx, DBG_SUBNET_CHECK, src_subnet, dst_subnet, same_subnet);
+
 	/* Determine the destination category for policy fallback. */
 	info = lookup_ip4_remote_endpoint(ip4->daddr, cluster_id);
 	if (info) {
 		*dst_sec_identity = info->sec_identity;
-		skip_tunnel = info->flag_skip_tunnel;
+		skip_tunnel = info->flag_skip_tunnel || (same_subnet);
 	} else {
 		*dst_sec_identity = WORLD_IPV4_ID;
 	}

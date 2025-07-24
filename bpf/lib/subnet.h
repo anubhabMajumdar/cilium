@@ -29,4 +29,35 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } cidr_subnet_map __section_maps_btf;
 
+/**
+ * lookup_subnet_id returns subnet ID for given IPv4 or IPv6 address
+ * - return 0 if no matching CIDR found
+ * - return ID (>=1) otherwise
+ */
+static __always_inline __u32 lookup_subnet_id(void *ip, __u8 family)
+{
+	struct lpm_trie_key key = {};
+	__u32 *subnet_id;
+
+	if (family == AF_INET) {
+		// IPv4 lookup
+		key.prefixlen = 32;
+		__builtin_memcpy(key.addr, ip, 4);
+		// Clear remaining bytes for IPv4
+		__builtin_memset(key.addr + 4, 0, 12);
+	} else if (family == AF_INET6) {
+		// IPv6 lookup
+		key.prefixlen = 128;
+		__builtin_memcpy(key.addr, ip, 16);
+	} else {
+		return 0; // Unsupported address family
+	}
+
+	subnet_id = (__u32 *)map_lookup_elem(&cidr_subnet_map, &key);
+	if (!subnet_id)
+		return 0; // No matching CIDR found
+
+	return *subnet_id;
+}
+
 #endif /* __LIB_SUBNET_H_ */

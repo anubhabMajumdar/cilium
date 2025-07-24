@@ -56,8 +56,15 @@
 # define build_bug_on(E)	((void)sizeof(char[1 - 2*!!(E)]))
 #endif
 
+static __always_inline void __bpf_build_bug(void)
+{
+	/* BPF-compatible build bug function that does nothing at runtime
+	 * but can be used for build-time assertions.
+	 */
+}
+
 #ifndef __throw_build_bug
-# define __throw_build_bug()	__builtin_trap()
+# define __throw_build_bug()	__bpf_build_bug()
 #endif
 
 #ifndef __printf
