@@ -414,8 +414,8 @@ func (n *DebugMsg) Message(linkMonitor getters.LinkGetter) string {
 	case DbgL7LB:
 		return fmt.Sprintf("L7 LB from %s to %s: proxy port %d", ip4Str(n.Arg1), ip4Str(n.Arg2), n.Arg3)
 	case DbgSameSubnetCheck:
-		return fmt.Sprintf("Same subnet check: src_subnet=%d, dst_subnet=%d, same_subnet=%t",
-			n.Arg1, n.Arg2, n.Arg3 != 0)
+		return fmt.Sprintf("Subnet check: src_ip=%s, dst_ip=%s, same_subnet=%t",
+			ip4Str(n.Arg1), ip4Str(n.Arg2), n.Arg3 != 0)
 	// For all other debug messages, we print the subtype and arguments
 	default:
 		return fmt.Sprintf("Unknown message type=%d arg1=%d arg2=%d", n.SubType, n.Arg1, n.Arg2)

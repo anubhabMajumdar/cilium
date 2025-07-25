@@ -499,9 +499,12 @@ static __always_inline int handle_ipv6_from_lxc(struct __ctx_buff *ctx, __u32 *d
 		__u32 dst_subnet = lookup_subnet_id(&ip6->daddr, AF_INET6);
 		bool same_subnet = (src_subnet == dst_subnet) && (src_subnet != 0);
 		// Log the same_subnet check for debugging using Cilium's debug mechanism
-		cilium_dbg3(ctx, DBG_SUBNET_CHECK, src_subnet, dst_subnet, same_subnet);
+		// cilium_dbg3(ctx, DBG_GENERIC, ip6->saddr->p4, ip6->daddr.p4, 0x6); // 0x6 = IPv6 marker
 
 		const union v6addr *daddr = (union v6addr *)&ip6->daddr;
+		const union v6addr *saddr = (union v6addr *)&ip6->saddr;
+
+		cilium_dbg3(ctx, DBG_SUBNET_CHECK, saddr->p4, daddr->p4, same_subnet); // 0x6 = IPv6 marker
 
 		info = lookup_ip6_remote_endpoint(daddr, 0);
 		if (info) {
@@ -940,10 +943,8 @@ static __always_inline int handle_ipv4_from_lxc(struct __ctx_buff *ctx, __u32 *d
 	__u32 src_subnet = lookup_subnet_id(&ip4->saddr, AF_INET);
 	__u32 dst_subnet = lookup_subnet_id(&ip4->daddr, AF_INET);
 	bool same_subnet = (src_subnet == dst_subnet) && (src_subnet != 0);
-	// Log the same_subnet check for debugging.
-	// Should be visible in trace_debug output.
-	// Log the same_subnet check for debugging using Cilium's debug mechanism
-	cilium_dbg3(ctx, DBG_SUBNET_CHECK, src_subnet, dst_subnet, same_subnet);
+	// Log the subnet check with IP addresses for debugging
+	cilium_dbg3(ctx, DBG_SUBNET_CHECK, ip4->saddr, ip4->daddr, same_subnet);
 
 	/* Determine the destination category for policy fallback. */
 	info = lookup_ip4_remote_endpoint(ip4->daddr, cluster_id);

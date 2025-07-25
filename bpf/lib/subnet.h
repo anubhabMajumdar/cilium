@@ -30,32 +30,44 @@ struct {
 } cidr_subnet_map __section_maps_btf;
 
 /**
- * lookup_subnet_id returns subnet ID for given IPv4 or IPv6 address
+ * lookup_subnet_id returns subnet ID for given IPv4 or IPv6 address using LPM trie
  * - return 0 if no matching CIDR found
  * - return ID (>=1) otherwise
+ * 
+ * BPF LPM trie works by finding the longest matching prefix automatically.
+ * We always use maximum prefix length in the lookup key.
  */
 static __always_inline __u32 lookup_subnet_id(void *ip, __u8 family)
 {
 	struct lpm_trie_key key = {};
 	__u32 *subnet_id;
 
+	// Initialize the key structure
+	__builtin_memset(&key, 0, sizeof(key));
+
 	if (family == AF_INET) {
-		// IPv4 lookup
+		// IPv4 lookup - use maximum prefix length for LPM trie lookup
+		// The trie will automatically find the longest matching prefix
 		key.prefixlen = 32;
 		__builtin_memcpy(key.addr, ip, 4);
-		// Clear remaining bytes for IPv4
+		// Explicitly clear the remaining bytes (already done by memset above, but being explicit)
 		__builtin_memset(key.addr + 4, 0, 12);
+		
 	} else if (family == AF_INET6) {
-		// IPv6 lookup
+		// IPv6 lookup - use maximum prefix length for LPM trie lookup
 		key.prefixlen = 128;
 		__builtin_memcpy(key.addr, ip, 16);
+		
 	} else {
 		return 0; // Unsupported address family
 	}
 
+	// Perform the LPM trie lookup
+	// The BPF LPM trie should automatically find the longest matching prefix
 	subnet_id = (__u32 *)map_lookup_elem(&cidr_subnet_map, &key);
-	if (!subnet_id)
+	if (!subnet_id) {
 		return 0; // No matching CIDR found
+	}
 
 	return *subnet_id;
 }
