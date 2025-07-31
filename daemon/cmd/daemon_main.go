@@ -619,6 +619,12 @@ func InitGlobalFlags(logger *slog.Logger, cmd *cobra.Command, vp *viper.Viper) {
 	flags.String(option.RoutingMode, defaults.RoutingMode, fmt.Sprintf("Routing mode (%q or %q)", option.RoutingModeNative, option.RoutingModeTunnel))
 	option.BindEnv(vp, option.RoutingMode)
 
+	flags.String(option.SubnetTopologyFilePath, defaults.SubnetTopologyFilePath, "Path to the subnet topology file")
+	option.BindEnv(vp, option.SubnetTopologyFilePath)
+
+	flags.String(option.SubnetTopologyFileName, defaults.SubnetTopologyFileName, "Name of the subnet topology file")
+	option.BindEnv(vp, option.SubnetTopologyFileName)
+
 	flags.String(option.ServiceNoBackendResponse, defaults.ServiceNoBackendResponse, "Response to traffic for a service without backends")
 	option.BindEnv(vp, option.ServiceNoBackendResponse)
 

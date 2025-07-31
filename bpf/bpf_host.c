@@ -54,6 +54,7 @@
 #include "lib/wireguard.h"
 #include "lib/l2_responder.h"
 #include "lib/vtep.h"
+#include "lib/subnet_topology.h"
 
  #define host_egress_policy_hook(ctx, src_sec_identity, ext_err) CTX_ACT_OK
  #define host_wg_encrypt_hook(ctx, proto, src_sec_identity)			\
@@ -814,7 +815,10 @@ skip_vtep:
 	info = lookup_ip4_remote_endpoint(ip4->daddr, 0);
 
 #ifdef TUNNEL_MODE
-	if (info && info->flag_skip_tunnel)
+	__u32 src_subnet_id = subnet_identity_lookup(ip4->saddr);
+	__u32 dst_subnet_id = subnet_identity_lookup(ip4->daddr);
+	bool same_subnet = (src_subnet_id == dst_subnet_id) && (src_subnet_id != 0);
+	if ((info && info->flag_skip_tunnel) || same_subnet)
 		goto skip_tunnel;
 
 	if (info && info->flag_has_tunnel_ep) {
@@ -825,7 +829,8 @@ skip_vtep:
 	}
 skip_tunnel:
 #endif
-
+	cilium_dbg3(ctx, DBG_TUNNEL_TRACE, ip4->saddr, ip4->daddr,
+			    2);
 	if (!info || (!from_proxy &&
 		      identity_is_world_ipv4(info->sec_identity))) {
 		/* We have received a packet for which no ipcache entry exists,

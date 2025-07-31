@@ -475,6 +475,10 @@ const (
 	// RoutingMode enables choosing between native routing mode or tunneling mode.
 	RoutingMode = "tunnel"
 
+	// SubnetTopologyFilePath is the default path the subnet topology configmap is mounted.
+	SubnetTopologyFilePath = "/subnet-topology"
+	SubnetTopologyFileName = "subnet-topology"
+
 	// TunnelProtocol is the default tunneling protocol
 	TunnelProtocol = "vxlan"
 

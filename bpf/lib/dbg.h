@@ -127,6 +127,7 @@ enum {
 				 * arg2: dst_subnet_id
 				 * arg3: subnet identity
 				 */
+	DBG_TUNNEL_TRACE,
 };
 
 /* Capture types */

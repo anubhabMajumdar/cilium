@@ -1260,6 +1260,10 @@ skip_vtep:
 	 * destination's `skip_tunnel` flag.
 	 */
 	if (ct_state->from_tunnel || !skip_tunnel) {
+
+		cilium_dbg3(ctx, DBG_TUNNEL_TRACE, ip4->saddr, ip4->daddr,
+			    1);
+
 		if (cluster_id > UINT16_MAX)
 			return DROP_INVALID_CLUSTER_ID;
 

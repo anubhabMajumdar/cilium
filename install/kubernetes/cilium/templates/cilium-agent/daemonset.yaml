@@ -299,6 +299,8 @@ spec:
           {{- end }}
         terminationMessagePolicy: FallbackToLogsOnError
         volumeMounts:
+        - name: subnet-topology
+          mountPath: /subnet-topology
         {{- if .Values.authentication.mutual.spire.enabled }}
         - name: spire-agent-socket
           mountPath: {{ dir .Values.authentication.mutual.spire.adminSocketPath }}
@@ -838,6 +840,9 @@ spec:
       {{- end }}
       {{- end }}
       volumes:
+      - name: subnet-topology
+        configMap:
+          name: subnet-topology
         # For sharing configuration between the "config" initContainer and the agent
       - name: tmp
         emptyDir: {}

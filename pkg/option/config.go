@@ -460,6 +460,10 @@ const (
 	// RoutingMode is the name of the option to choose between native routing and tunneling mode
 	RoutingMode = "routing-mode"
 
+	// SubnetTopology is the name of the option to provide a subnet topology
+	SubnetTopologyFilePath = "subnet-topology-path"
+	SubnetTopologyFileName = "subnet-topology-file-name"
+
 	// ServiceNoBackendResponse is the name of the option to pick how to handle traffic for services
 	// without any backends
 	ServiceNoBackendResponse = "service-no-backend-response"
@@ -1229,6 +1233,9 @@ type DaemonConfig struct {
 
 	DatapathMode string // Datapath mode
 	RoutingMode  string // Routing mode
+
+	SubnetTopologyFilePath string // Path to the file containing the node's subnets
+	SubnetTopologyFileName string // Name of the file containing the node's subnets
 
 	DryMode bool // Do not create BPF maps, devices, ..
 
@@ -2720,6 +2727,8 @@ func (c *DaemonConfig) Populate(logger *slog.Logger, vp *viper.Viper) {
 	c.EnableIPSecEncryptedOverlay = vp.GetBool(EnableIPSecEncryptedOverlay)
 	c.BootIDFile = vp.GetString(BootIDFilename)
 	c.EnableExtendedIPProtocols = vp.GetBool(EnableExtendedIPProtocols)
+	c.SubnetTopologyFilePath = vp.GetString(SubnetTopologyFilePath)
+	c.SubnetTopologyFileName = vp.GetString(SubnetTopologyFileName)
 
 	c.ServiceNoBackendResponse = vp.GetString(ServiceNoBackendResponse)
 	switch c.ServiceNoBackendResponse {
