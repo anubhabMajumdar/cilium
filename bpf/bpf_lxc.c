@@ -1343,6 +1343,8 @@ to_host:
 
 pass_to_stack:
 #ifdef ENABLE_ROUTING
+	cilium_dbg3(ctx, DBG_TUNNEL_TRACE, ip4->saddr, ip4->daddr,
+					2);
 	ret = ipv4_l3(ctx, ETH_HLEN, NULL, (__u8 *)&router_mac.addr, ip4);
 	if (unlikely(ret != CTX_ACT_OK))
 		return ret;
