@@ -48,6 +48,13 @@ func newGlobalNamespaceTracker(params NamespaceWatcherParams) GlobalNamespaceTra
 		job.OneShot(
 			"namespace-watcher",
 			func(ctx context.Context, _ cell.Health) error {
+				nsStore, err := watcher.namespaceResource.Store(ctx)
+				if err != nil {
+					return err
+				}
+				watcher.nsStore = nsStore
+
+				// Start processing namespace events
 				for event := range params.Namespaces.Events(ctx) {
 					event.Done(nil)
 

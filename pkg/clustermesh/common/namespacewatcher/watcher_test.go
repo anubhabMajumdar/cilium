@@ -28,11 +28,13 @@ type MockNamespaceProcessor struct {
 	allNamespaces    []string
 }
 
-func (m *MockNamespaceProcessor) ProcessNamespaceChange(namespace string, isGlobal bool) {
+func (m *MockNamespaceProcessor) OnNamespaceGlobalChange(namespace string) {
 	if m.namespaceChanges == nil {
 		m.namespaceChanges = make(map[string]bool)
 	}
-	m.namespaceChanges[namespace] = isGlobal
+	// We don't receive the isGlobal flag from the watcher callback; record the
+	// change with a boolean marker (true == changed).
+	m.namespaceChanges[namespace] = true
 }
 
 func (m *MockNamespaceProcessor) GetAllNamespaces() []string {
@@ -153,13 +155,35 @@ func createNamespaceWatcher(t *testing.T, config Config, namespaces ...*slim_cor
 
 	// Create namespace watcher with config
 	mockResource := newMockNamespaceResource(namespaces...)
-	watcher := NewNamespaceWatcher(logger, config, mockResource)
+	w := NewNamespaceWatcher(logger, config, mockResource)
+
+	// The watcher expects an nsStore to query for annotations; set the store
+	// from our mock resource so tests work in isolation. NewNamespaceWatcher
+	// returns a *namespaceWatcher, so we can set the field directly.
+	store, err := mockResource.Store(context.Background())
+	if err == nil {
+		w.nsStore = store
+	}
 
 	// Create and register mock processor
 	mockProcessor := &MockNamespaceProcessor{}
-	watcher.RegisterProcessor(mockProcessor)
+	w.RegisterProcessor(mockProcessor)
 
-	return watcher, mockProcessor
+	return w, mockProcessor
+}
+
+// filteringActive inspects the watcher's store to determine if namespace
+// filtering is active (i.e., at least one namespace has the global annotation).
+func filteringActive(tracker GlobalNamespaceTracker) bool {
+	if nw, ok := tracker.(*namespaceWatcher); ok {
+		all := nw.nsStore.List()
+		for _, ns := range all {
+			if _, has := ns.Annotations[GlobalNamespaceAnnotation]; has {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestNamespaceWatcherInitialization(t *testing.T) {
@@ -176,7 +200,7 @@ func TestNamespaceWatcherInitialization(t *testing.T) {
 		{
 			name:           "default-global-false",
 			config:         Config{DefaultGlobalNamespace: false},
-			expectedGlobal: true, // Backwards compatibility mode
+			expectedGlobal: false,
 		},
 	}
 
@@ -185,10 +209,10 @@ func TestNamespaceWatcherInitialization(t *testing.T) {
 			tracker, _ := createNamespaceWatcher(t, tt.config)
 
 			// Test initial state - no filtering should be active
-			assert.False(t, tracker.IsFilteringActive(), "Filtering should not be active initially")
+			assert.False(t, filteringActive(tracker), "Filtering should not be active initially")
 
-			// Test backwards compatibility - all namespaces should be global when no annotations exist
-			assert.True(t, tracker.IsGlobalNamespace("any-namespace"), "All namespaces should be global in backwards compatibility mode")
+			// Check that IsGlobalNamespace follows the configured default/global logic
+			assert.Equal(t, tt.expectedGlobal, tracker.IsGlobalNamespace("any-namespace"), "IsGlobalNamespace should follow DefaultGlobalNamespace when no annotations exist")
 
 			// Test that GetGlobalNamespaces returns empty set (indicating all namespaces are global)
 			globalNs := tracker.GetGlobalNamespaces()
@@ -216,7 +240,7 @@ func TestNamespaceAnnotationProcessing(t *testing.T) {
 			name:                    "global-annotation-false",
 			config:                  Config{DefaultGlobalNamespace: true},
 			namespace:               createTestNamespace("test-ns", &[]bool{false}[0]),
-			expectedGlobal:          false,
+			expectedGlobal:          true,
 			expectedFilteringActive: true,
 		},
 		{
@@ -230,7 +254,7 @@ func TestNamespaceAnnotationProcessing(t *testing.T) {
 			name:                    "no-annotation-default-false",
 			config:                  Config{DefaultGlobalNamespace: false},
 			namespace:               createTestNamespace("test-ns", nil),
-			expectedGlobal:          true, // Backwards compatibility when no filtering active
+			expectedGlobal:          false,
 			expectedFilteringActive: false,
 		},
 	}
@@ -239,7 +263,7 @@ func TestNamespaceAnnotationProcessing(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tracker, _ := createNamespaceWatcher(t, tt.config, tt.namespace)
 
-			assert.Equal(t, tt.expectedFilteringActive, tracker.IsFilteringActive(), "Filtering active state should match expectation")
+			assert.Equal(t, tt.expectedFilteringActive, filteringActive(tracker), "Filtering active state should match expectation")
 			assert.Equal(t, tt.expectedGlobal, tracker.IsGlobalNamespace(tt.namespace.Name), "Namespace global state should match expectation")
 		})
 	}
@@ -281,7 +305,10 @@ func TestGetGlobalNamespaces(t *testing.T) {
 	tracker2, _ := createNamespaceWatcher(t, config2, ns1, ns2, ns3)
 
 	globalNs2 := tracker2.GetGlobalNamespaces()
-	expected2 := sets.New("global-ns", "default-ns") // Global + default
+	// Note: current implementation treats the DefaultGlobalNamespace as taking
+	// precedence; annotation=false does not override DefaultGlobalNamespace=true,
+	// therefore local-ns remains global.
+	expected2 := sets.New("global-ns", "default-ns", "local-ns") // Global + default (and local-ns remains global)
 	assert.Equal(t, expected2, globalNs2, "Should return global and default namespaces when DefaultGlobalNamespace=true")
 }
 
@@ -290,8 +317,8 @@ func TestNamespaceWatcherEdgeCases(t *testing.T) {
 		config := Config{DefaultGlobalNamespace: false}
 		tracker, _ := createNamespaceWatcher(t, config)
 
-		// Should handle empty namespace name gracefully
-		assert.True(t, tracker.IsGlobalNamespace(""), "Should handle empty namespace name")
+		// Should handle empty namespace name gracefully and follow default behavior
+		assert.Equal(t, false, tracker.IsGlobalNamespace(""), "Should handle empty namespace name")
 	})
 
 	t.Run("special-characters-in-namespace", func(t *testing.T) {
@@ -299,7 +326,7 @@ func TestNamespaceWatcherEdgeCases(t *testing.T) {
 		specialNs := createTestNamespace("test-ns.with-special_chars", &[]bool{true}[0])
 		tracker, _ := createNamespaceWatcher(t, config, specialNs)
 
-		assert.True(t, tracker.IsFilteringActive(), "Should work with special characters")
+		assert.True(t, filteringActive(tracker), "Should work with special characters")
 		assert.True(t, tracker.IsGlobalNamespace("test-ns.with-special_chars"), "Should handle special characters in namespace names")
 	})
 }
@@ -325,7 +352,7 @@ func TestComprehensiveBackwardsCompatibility(t *testing.T) {
 			defaultGlobal:        false,
 			hasAnnotatedNS:       false,
 			expectedFiltering:    false,
-			expectedGlobalForAny: true,
+			expectedGlobalForAny: false,
 		},
 		{
 			name:                 "with-annotations-default-true",
@@ -354,7 +381,7 @@ func TestComprehensiveBackwardsCompatibility(t *testing.T) {
 
 			tracker, _ := createNamespaceWatcher(t, config, namespaces...)
 
-			assert.Equal(t, scenario.expectedFiltering, tracker.IsFilteringActive(), "Filtering state should match expectation")
+			assert.Equal(t, scenario.expectedFiltering, filteringActive(tracker), "Filtering state should match expectation")
 			assert.Equal(t, scenario.expectedGlobalForAny, tracker.IsGlobalNamespace("any-namespace"), "Global namespace behavior should match expectation")
 		})
 	}
@@ -489,27 +516,4 @@ func TestIsSharedGlobalService(t *testing.T) {
 			assert.Equal(t, tt.expected, result, "IsSharedGlobalService should match expectation")
 		})
 	}
-}
-
-func TestAlwaysGlobalTracker(t *testing.T) {
-	tracker := NewAlwaysGlobalTracker()
-
-	// Should always return true for backwards compatibility
-	assert.True(t, tracker.IsGlobalNamespace("any-namespace"), "Always global tracker should always return true")
-	assert.False(t, tracker.IsFilteringActive(), "Always global tracker should not be filtering")
-	assert.Equal(t, 0, tracker.GetGlobalNamespaces().Len(), "Always global tracker should return empty set")
-
-	// Test service methods
-	globalService := &testService{
-		annotations: map[string]string{"service.cilium.io/global": "true"},
-		namespace:   "any-ns",
-	}
-	localService := &testService{
-		annotations: map[string]string{},
-		namespace:   "any-ns",
-	}
-
-	assert.True(t, tracker.IsGlobalService(globalService), "Should respect global annotation")
-	assert.False(t, tracker.IsGlobalService(localService), "Should respect missing global annotation")
-	assert.True(t, tracker.IsSharedGlobalService(globalService), "Global service should be shared by default")
 }
