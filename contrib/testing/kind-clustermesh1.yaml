@@ -22,6 +22,30 @@ readinessProbe:
   failureThreshold: 9999
 startupProbe:
   failureThreshold: 9999
+
+# TLS configuration - DO NOT share CA key, only trust bundle
+tls:
+  ca:
+    cert: ""  # Do not provide
+    key: ""   # Do not provide
+  caBundle:
+    enabled: true
+    name: cilium-root-ca.crt
+    key: ca.crt
+    useSecret: false
+
+# Hubble TLS - disable auto-generation
+hubble:
+  tls:
+    auto:
+      enabled: false
+    server:
+      existingSecret: hubble-server-certs
+  relay:
+    tls:
+      client:
+        existingSecret: hubble-relay-client-certs
+
 clustermesh:
   useAPIServer: true
   config:
@@ -36,3 +60,9 @@ clustermesh:
     kvstoremesh:
       readinessProbe:
         periodSeconds: 1
+    tls:
+      # Use per-cluster authentication with shared CA
+      authMode: cluster
+      auto:
+        # Disable auto-generation - provide certs manually
+        enabled: false

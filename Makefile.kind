@@ -169,6 +169,205 @@ kind-install-cilium-clustermesh-fast: check_deps kind-clustermesh-ready kind-loa
 	$(MAKE) kind-image-fast
 	$(MAKE) kind-connect-clustermesh
 
+.PHONY: kind-install-cilium-clustermesh-manual-cert-fast
+kind-install-cilium-clustermesh-manual-cert-fast: check_deps kind-clustermesh-ready kind-load-base-images kind-generate-clustermesh-certs kind-deploy-clustermesh-certs
+	@echo "  INSTALL cilium on clustermesh1 cluster with manual certs"
+	-$(CILIUM_CLI) --context=kind-clustermesh1 uninstall >/dev/null
+	$(CILIUM_CLI) --context=kind-clustermesh1 install \
+		--chart-directory=$(ROOT_DIR)/install/kubernetes/cilium \
+		--values=$(ROOT_DIR)/contrib/testing/kind-clustermesh1.yaml \
+		--values=$(ROOT_DIR)/contrib/testing/kind-fast.yaml \
+		--set=clustermesh.apiserver.kvstoremesh.enabled=$(ENABLE_KVSTOREMESH)
+
+	@echo "  INSTALL cilium on clustermesh2 cluster with manual certs"
+	-$(CILIUM_CLI) --context=kind-clustermesh2 uninstall >/dev/null
+	$(CILIUM_CLI) --context=kind-clustermesh2 install \
+		--chart-directory=$(ROOT_DIR)/install/kubernetes/cilium \
+		--values=$(ROOT_DIR)/contrib/testing/kind-clustermesh2.yaml \
+		--values=$(ROOT_DIR)/contrib/testing/kind-fast.yaml \
+		--set=clustermesh.apiserver.kvstoremesh.enabled=$(ENABLE_KVSTOREMESH)
+
+	$(MAKE) kind-image-fast
+	$(MAKE) kind-connect-clustermesh
+
+# Directory to store generated certificates
+CLUSTERMESH_CERTS_DIR ?= $(ROOT_DIR)/.clustermesh-certs
+CERT_VALIDITY_DAYS ?= 1095
+
+.PHONY: kind-generate-clustermesh-certs
+kind-generate-clustermesh-certs: ## Generate certificates for clustermesh-apiserver manual mode
+	@echo "  GENERATE clustermesh certificates"
+	@mkdir -p $(CLUSTERMESH_CERTS_DIR)
+	@# Generate CA (if not exists)
+	@if [ ! -f $(CLUSTERMESH_CERTS_DIR)/ca.key ]; then \
+		echo "  Generating CA..."; \
+		openssl genrsa -out $(CLUSTERMESH_CERTS_DIR)/ca.key 4096; \
+		openssl req -new -x509 -days $(CERT_VALIDITY_DAYS) \
+			-key $(CLUSTERMESH_CERTS_DIR)/ca.key \
+			-out $(CLUSTERMESH_CERTS_DIR)/ca.crt \
+			-subj "/C=US/O=Cilium/CN=Cilium CA"; \
+	else \
+		echo "  CA already exists, skipping..."; \
+	fi
+	@# Generate certificates for clustermesh1
+	@echo "  Generating clustermesh1 certificates..."
+	@# Server certificate
+	@openssl genrsa -out $(CLUSTERMESH_CERTS_DIR)/clustermesh1-server.key 4096
+	@openssl req -new -key $(CLUSTERMESH_CERTS_DIR)/clustermesh1-server.key \
+		-out $(CLUSTERMESH_CERTS_DIR)/clustermesh1-server.csr \
+		-subj "/CN=*.mesh.cilium.io"
+	@openssl x509 -req -in $(CLUSTERMESH_CERTS_DIR)/clustermesh1-server.csr \
+		-CA $(CLUSTERMESH_CERTS_DIR)/ca.crt -CAkey $(CLUSTERMESH_CERTS_DIR)/ca.key \
+		-CAcreateserial -out $(CLUSTERMESH_CERTS_DIR)/clustermesh1-server.crt \
+		-days $(CERT_VALIDITY_DAYS) \
+		-extfile <(printf "subjectAltName=DNS:*.mesh.cilium.io,DNS:clustermesh-apiserver.kube-system.svc,DNS:clustermesh-apiserver.kube-system.svc.cluster.local,IP:127.0.0.1\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth,clientAuth")
+	@# Admin certificate
+	@openssl genrsa -out $(CLUSTERMESH_CERTS_DIR)/clustermesh1-admin.key 4096
+	@openssl req -new -key $(CLUSTERMESH_CERTS_DIR)/clustermesh1-admin.key \
+		-out $(CLUSTERMESH_CERTS_DIR)/clustermesh1-admin.csr \
+		-subj "/CN=root"
+	@openssl x509 -req -in $(CLUSTERMESH_CERTS_DIR)/clustermesh1-admin.csr \
+		-CA $(CLUSTERMESH_CERTS_DIR)/ca.crt -CAkey $(CLUSTERMESH_CERTS_DIR)/ca.key \
+		-CAcreateserial -out $(CLUSTERMESH_CERTS_DIR)/clustermesh1-admin.crt \
+		-days $(CERT_VALIDITY_DAYS) \
+		-extfile <(printf "keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth")
+	@# Remote certificate for clustermesh1 (clustermesh1's identity when connecting to remote clusters)
+	@openssl genrsa -out $(CLUSTERMESH_CERTS_DIR)/clustermesh1-remote.key 4096
+	@openssl req -new -key $(CLUSTERMESH_CERTS_DIR)/clustermesh1-remote.key \
+		-out $(CLUSTERMESH_CERTS_DIR)/clustermesh1-remote.csr \
+		-subj "/CN=remote-clustermesh1"
+	@openssl x509 -req -in $(CLUSTERMESH_CERTS_DIR)/clustermesh1-remote.csr \
+		-CA $(CLUSTERMESH_CERTS_DIR)/ca.crt -CAkey $(CLUSTERMESH_CERTS_DIR)/ca.key \
+		-CAcreateserial -out $(CLUSTERMESH_CERTS_DIR)/clustermesh1-remote.crt \
+		-days $(CERT_VALIDITY_DAYS) \
+		-extfile <(printf "keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth")
+	@# Generate certificates for clustermesh2
+	@echo "  Generating clustermesh2 certificates..."
+	@# Server certificate
+	@openssl genrsa -out $(CLUSTERMESH_CERTS_DIR)/clustermesh2-server.key 4096
+	@openssl req -new -key $(CLUSTERMESH_CERTS_DIR)/clustermesh2-server.key \
+		-out $(CLUSTERMESH_CERTS_DIR)/clustermesh2-server.csr \
+		-subj "/CN=*.mesh.cilium.io"
+	@openssl x509 -req -in $(CLUSTERMESH_CERTS_DIR)/clustermesh2-server.csr \
+		-CA $(CLUSTERMESH_CERTS_DIR)/ca.crt -CAkey $(CLUSTERMESH_CERTS_DIR)/ca.key \
+		-CAcreateserial -out $(CLUSTERMESH_CERTS_DIR)/clustermesh2-server.crt \
+		-days $(CERT_VALIDITY_DAYS) \
+		-extfile <(printf "subjectAltName=DNS:*.mesh.cilium.io,DNS:clustermesh-apiserver.kube-system.svc,DNS:clustermesh-apiserver.kube-system.svc.cluster.local,IP:127.0.0.1\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth,clientAuth")
+	@# Admin certificate
+	@openssl genrsa -out $(CLUSTERMESH_CERTS_DIR)/clustermesh2-admin.key 4096
+	@openssl req -new -key $(CLUSTERMESH_CERTS_DIR)/clustermesh2-admin.key \
+		-out $(CLUSTERMESH_CERTS_DIR)/clustermesh2-admin.csr \
+		-subj "/CN=root"
+	@openssl x509 -req -in $(CLUSTERMESH_CERTS_DIR)/clustermesh2-admin.csr \
+		-CA $(CLUSTERMESH_CERTS_DIR)/ca.crt -CAkey $(CLUSTERMESH_CERTS_DIR)/ca.key \
+		-CAcreateserial -out $(CLUSTERMESH_CERTS_DIR)/clustermesh2-admin.crt \
+		-days $(CERT_VALIDITY_DAYS) \
+		-extfile <(printf "keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth")
+	@# Remote certificate for clustermesh2 (clustermesh2's identity when connecting to remote clusters)
+	@openssl genrsa -out $(CLUSTERMESH_CERTS_DIR)/clustermesh2-remote.key 4096
+	@openssl req -new -key $(CLUSTERMESH_CERTS_DIR)/clustermesh2-remote.key \
+		-out $(CLUSTERMESH_CERTS_DIR)/clustermesh2-remote.csr \
+		-subj "/CN=remote-clustermesh2"
+	@openssl x509 -req -in $(CLUSTERMESH_CERTS_DIR)/clustermesh2-remote.csr \
+		-CA $(CLUSTERMESH_CERTS_DIR)/ca.crt -CAkey $(CLUSTERMESH_CERTS_DIR)/ca.key \
+		-CAcreateserial -out $(CLUSTERMESH_CERTS_DIR)/clustermesh2-remote.crt \
+		-days $(CERT_VALIDITY_DAYS) \
+		-extfile <(printf "keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth")
+	@# Cleanup CSR files
+	@rm -f $(CLUSTERMESH_CERTS_DIR)/*.csr
+	@echo "  Certificates generated in $(CLUSTERMESH_CERTS_DIR)"
+	@echo "  CA key is at $(CLUSTERMESH_CERTS_DIR)/ca.key - DO NOT deploy this to clusters!"
+
+.PHONY: kind-deploy-clustermesh-certs
+kind-deploy-clustermesh-certs: kind-clustermesh-ready ## Deploy manual certificates to clustermesh clusters
+	@echo "  DEPLOY clustermesh certificates"
+	@# Deploy CA trust bundle to both clusters (only ca.crt, NOT ca.key)
+	@echo "  Deploying CA trust bundle..."
+	@$(KUBECTL) --context=kind-clustermesh1 create configmap cilium-root-ca.crt \
+		-n kube-system \
+		--from-file=ca.crt=$(CLUSTERMESH_CERTS_DIR)/ca.crt \
+		--dry-run=client -o yaml | $(KUBECTL) --context=kind-clustermesh1 apply -f -
+	@$(KUBECTL) --context=kind-clustermesh2 create configmap cilium-root-ca.crt \
+		-n kube-system \
+		--from-file=ca.crt=$(CLUSTERMESH_CERTS_DIR)/ca.crt \
+		--dry-run=client -o yaml | $(KUBECTL) --context=kind-clustermesh2 apply -f -
+	@# Deploy certificates to clustermesh1
+	@echo "  Deploying clustermesh1 secrets..."
+	@$(KUBECTL) --context=kind-clustermesh1 create secret generic clustermesh-apiserver-server-cert \
+		-n kube-system \
+		--from-file=tls.crt=$(CLUSTERMESH_CERTS_DIR)/clustermesh1-server.crt \
+		--from-file=tls.key=$(CLUSTERMESH_CERTS_DIR)/clustermesh1-server.key \
+		--from-file=ca.crt=$(CLUSTERMESH_CERTS_DIR)/ca.crt \
+		--dry-run=client -o yaml | $(KUBECTL) --context=kind-clustermesh1 apply -f -
+	@$(KUBECTL) --context=kind-clustermesh1 create secret generic clustermesh-apiserver-admin-cert \
+		-n kube-system \
+		--from-file=tls.crt=$(CLUSTERMESH_CERTS_DIR)/clustermesh1-admin.crt \
+		--from-file=tls.key=$(CLUSTERMESH_CERTS_DIR)/clustermesh1-admin.key \
+		--from-file=ca.crt=$(CLUSTERMESH_CERTS_DIR)/ca.crt \
+		--dry-run=client -o yaml | $(KUBECTL) --context=kind-clustermesh1 apply -f -
+	@$(KUBECTL) --context=kind-clustermesh1 create secret generic clustermesh-apiserver-remote-cert \
+		-n kube-system \
+		--from-file=tls.crt=$(CLUSTERMESH_CERTS_DIR)/clustermesh1-remote.crt \
+		--from-file=tls.key=$(CLUSTERMESH_CERTS_DIR)/clustermesh1-remote.key \
+		--from-file=ca.crt=$(CLUSTERMESH_CERTS_DIR)/ca.crt \
+		--dry-run=client -o yaml | $(KUBECTL) --context=kind-clustermesh1 apply -f -
+	@openssl genrsa -out $(CLUSTERMESH_CERTS_DIR)/clustermesh1-local.key 4096
+	@openssl req -new -key $(CLUSTERMESH_CERTS_DIR)/clustermesh1-local.key \
+		-out $(CLUSTERMESH_CERTS_DIR)/clustermesh1-local.csr \
+		-subj "/CN=local-clustermesh1"
+	@openssl x509 -req -in $(CLUSTERMESH_CERTS_DIR)/clustermesh1-local.csr \
+		-CA $(CLUSTERMESH_CERTS_DIR)/ca.crt -CAkey $(CLUSTERMESH_CERTS_DIR)/ca.key \
+		-CAcreateserial -out $(CLUSTERMESH_CERTS_DIR)/clustermesh1-local.crt \
+		-days $(CERT_VALIDITY_DAYS) \
+		-extfile <(printf "keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth")
+	@$(KUBECTL) --context=kind-clustermesh1 create secret generic clustermesh-apiserver-local-cert \
+		-n kube-system \
+		--from-file=tls.crt=$(CLUSTERMESH_CERTS_DIR)/clustermesh1-local.crt \
+		--from-file=tls.key=$(CLUSTERMESH_CERTS_DIR)/clustermesh1-local.key \
+		--from-file=ca.crt=$(CLUSTERMESH_CERTS_DIR)/ca.crt \
+		--dry-run=client -o yaml | $(KUBECTL) --context=kind-clustermesh1 apply -f -
+	@# Deploy certificates to clustermesh2
+	@echo "  Deploying clustermesh2 secrets..."
+	@$(KUBECTL) --context=kind-clustermesh2 create secret generic clustermesh-apiserver-server-cert \
+		-n kube-system \
+		--from-file=tls.crt=$(CLUSTERMESH_CERTS_DIR)/clustermesh2-server.crt \
+		--from-file=tls.key=$(CLUSTERMESH_CERTS_DIR)/clustermesh2-server.key \
+		--from-file=ca.crt=$(CLUSTERMESH_CERTS_DIR)/ca.crt \
+		--dry-run=client -o yaml | $(KUBECTL) --context=kind-clustermesh2 apply -f -
+	@$(KUBECTL) --context=kind-clustermesh2 create secret generic clustermesh-apiserver-admin-cert \
+		-n kube-system \
+		--from-file=tls.crt=$(CLUSTERMESH_CERTS_DIR)/clustermesh2-admin.crt \
+		--from-file=tls.key=$(CLUSTERMESH_CERTS_DIR)/clustermesh2-admin.key \
+		--from-file=ca.crt=$(CLUSTERMESH_CERTS_DIR)/ca.crt \
+		--dry-run=client -o yaml | $(KUBECTL) --context=kind-clustermesh2 apply -f -
+	@$(KUBECTL) --context=kind-clustermesh2 create secret generic clustermesh-apiserver-remote-cert \
+		-n kube-system \
+		--from-file=tls.crt=$(CLUSTERMESH_CERTS_DIR)/clustermesh2-remote.crt \
+		--from-file=tls.key=$(CLUSTERMESH_CERTS_DIR)/clustermesh2-remote.key \
+		--from-file=ca.crt=$(CLUSTERMESH_CERTS_DIR)/ca.crt \
+		--dry-run=client -o yaml | $(KUBECTL) --context=kind-clustermesh2 apply -f -
+	@openssl genrsa -out $(CLUSTERMESH_CERTS_DIR)/clustermesh2-local.key 4096
+	@openssl req -new -key $(CLUSTERMESH_CERTS_DIR)/clustermesh2-local.key \
+		-out $(CLUSTERMESH_CERTS_DIR)/clustermesh2-local.csr \
+		-subj "/CN=local-clustermesh2"
+	@openssl x509 -req -in $(CLUSTERMESH_CERTS_DIR)/clustermesh2-local.csr \
+		-CA $(CLUSTERMESH_CERTS_DIR)/ca.crt -CAkey $(CLUSTERMESH_CERTS_DIR)/ca.key \
+		-CAcreateserial -out $(CLUSTERMESH_CERTS_DIR)/clustermesh2-local.crt \
+		-days $(CERT_VALIDITY_DAYS) \
+		-extfile <(printf "keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth")
+	@$(KUBECTL) --context=kind-clustermesh2 create secret generic clustermesh-apiserver-local-cert \
+		-n kube-system \
+		--from-file=tls.crt=$(CLUSTERMESH_CERTS_DIR)/clustermesh2-local.crt \
+		--from-file=tls.key=$(CLUSTERMESH_CERTS_DIR)/clustermesh2-local.key \
+		--from-file=ca.crt=$(CLUSTERMESH_CERTS_DIR)/ca.crt \
+		--dry-run=client -o yaml | $(KUBECTL) --context=kind-clustermesh2 apply -f -
+	@echo "  Certificates deployed successfully"
+
+.PHONY: kind-clean-clustermesh-certs
+kind-clean-clustermesh-certs: ## Clean generated clustermesh certificates
+	@echo "  CLEAN clustermesh certificates"
+	@rm -rf $(CLUSTERMESH_CERTS_DIR)
+
 KIND_CLUSTER_NAME ?= $(shell kind get clusters -q | head -n1)
 
 .PHONY: kind-ready
@@ -181,9 +380,9 @@ PREPULL_IMAGES ?= quay.io/cilium/cilium-ci:latest  quay.io/cilium/operator-gener
 .PHONY: kind-load-base-images
 kind-load-base-images:
 	@echo "  PULL cluster images"
-	for image in $(PREPULL_IMAGES); do docker pull $$image; done
+	for image in $(PREPULL_IMAGES); do docker pull --platform linux/amd64 $$image; done
 	for cluster_name in $${KIND_CLUSTERS:-$(shell kind get clusters)}; do \
-		kind load docker-image $(PREPULL_IMAGES) -n $$cluster_name; \
+		kind load docker-image $(PREPULL_IMAGES) -n $$cluster_name || true; \
 	done
 
 $(eval $(call KIND_ENV,kind-build-image-agent))
