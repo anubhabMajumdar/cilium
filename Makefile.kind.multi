@@ -1,0 +1,471 @@
+# Copyright Authors of Cilium
+# SPDX-License-Identifier: Apache-2.0
+
+##@ Development (Kind) - Multi-Cluster ClusterMesh with Separate CAs
+
+# ============================================================================
+# 3-Cluster ClusterMesh Setup with Different CAs
+# Each cluster has its own CA, trust bundle contains all CAs
+# Clusters are connected via helm values (clustermesh.config.clusters)
+# Hubble, Hubble Relay, and Hubble UI enabled
+# - Hubble server (agent) uses TLS
+# - Hubble relay client (relay->agent) uses TLS
+# - Hubble relay server (user->relay) does NOT use TLS (for easy access)
+# ============================================================================
+
+CLUSTERMESH_MULTI_CERTS_DIR ?= $(ROOT_DIR)/.clustermesh-multi-certs
+CERT_VALIDITY_DAYS ?= 1095
+ENABLE_KVSTOREMESH ?= true
+
+# Cluster names
+CLUSTER1_NAME ?= clustermesh1
+CLUSTER2_NAME ?= clustermesh2
+CLUSTER3_NAME ?= clustermesh3
+
+# NodePorts for each cluster's clustermesh-apiserver
+CLUSTER1_NODEPORT ?= 32379
+CLUSTER2_NODEPORT ?= 32380
+CLUSTER3_NODEPORT ?= 32381
+
+.PHONY: kind-clustermesh-multi
+kind-clustermesh-multi: ## Create three kind clusters for multi-cluster clustermesh development.
+	@echo " If you have problems with too many open files, check https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files"
+	$(QUIET) CLUSTER_NAME=$(CLUSTER1_NAME) IPFAMILY=dual PODSUBNET=10.1.0.0/16,fd00:10:1::/48 SERVICESUBNET=172.20.1.0/24,fd00:10:f1::/112 ./contrib/scripts/kind.sh
+	$(QUIET) CLUSTER_NAME=$(CLUSTER2_NAME) AGENTPORTPREFIX=236 OPERATORPORTPREFIX=237 IPFAMILY=dual PODSUBNET=10.2.0.0/16,fd00:10:2::/48 SERVICESUBNET=172.20.2.0/24,fd00:10:f2::/112 ./contrib/scripts/kind.sh
+	$(QUIET) CLUSTER_NAME=$(CLUSTER3_NAME) AGENTPORTPREFIX=238 OPERATORPORTPREFIX=239 IPFAMILY=dual PODSUBNET=10.3.0.0/16,fd00:10:3::/48 SERVICESUBNET=172.20.3.0/24,fd00:10:f3::/112 ./contrib/scripts/kind.sh
+
+.PHONY: kind-clustermesh-multi-down
+kind-clustermesh-multi-down: ## Destroy kind clusters for multi-cluster clustermesh development.
+	$(QUIET)./contrib/scripts/kind-down.sh $(CLUSTER1_NAME) $(CLUSTER2_NAME) $(CLUSTER3_NAME)
+
+.PHONY: kind-clustermesh-multi-ready
+kind-clustermesh-multi-ready: ## Check if all three kind clustermesh clusters exist
+	@$(ECHO_CHECK) clustermesh-multi kind is ready...
+	@kind get clusters 2>&1 | grep -q "$(CLUSTER1_NAME)" || (echo "$(CLUSTER1_NAME) not found" && exit 1)
+	@kind get clusters 2>&1 | grep -q "$(CLUSTER2_NAME)" || (echo "$(CLUSTER2_NAME) not found" && exit 1)
+	@kind get clusters 2>&1 | grep -q "$(CLUSTER3_NAME)" || (echo "$(CLUSTER3_NAME) not found" && exit 1)
+	@echo "All three clusters are ready"
+
+.PHONY: kind-generate-clustermesh-certs-multi-ca
+kind-generate-clustermesh-certs-multi-ca: ## Generate certificates with separate CAs for each of the 3 clusters
+	@echo "  GENERATE clustermesh certificates (3 different CAs)"
+	@mkdir -p $(CLUSTERMESH_MULTI_CERTS_DIR)
+	@# ========== Generate CA for each cluster ==========
+	@for cluster in $(CLUSTER1_NAME) $(CLUSTER2_NAME) $(CLUSTER3_NAME); do \
+	    if [ ! -f $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.key ]; then \
+	        echo "  Generating CA for $$cluster..."; \
+	        openssl genrsa -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.key 4096; \
+	        openssl req -new -x509 -days $(CERT_VALIDITY_DAYS) \
+	            -key $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.key \
+	            -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.crt \
+	            -subj "/C=US/O=Cilium/CN=Cilium CA - $$cluster"; \
+	    else \
+	        echo "  CA for $$cluster already exists, skipping..."; \
+	    fi; \
+	done
+	@# Create combined CA bundle (all 3 CAs)
+	@echo "  Creating combined CA bundle..."
+	@cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER1_NAME)-ca.crt \
+	    $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER2_NAME)-ca.crt \
+	    $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER3_NAME)-ca.crt \
+	    > $(CLUSTERMESH_MULTI_CERTS_DIR)/ca-bundle.crt
+	@# ========== Generate ClusterMesh certificates for each cluster ==========
+	@for cluster in $(CLUSTER1_NAME) $(CLUSTER2_NAME) $(CLUSTER3_NAME); do \
+	    echo "  Generating ClusterMesh certificates for $$cluster (signed by $$cluster CA)..."; \
+	    \
+	    echo "    Server certificate..."; \
+	    openssl genrsa -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-server.key 4096; \
+	    openssl req -new -key $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-server.key \
+	        -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-server.csr \
+	        -subj "/CN=*.mesh.cilium.io"; \
+	    openssl x509 -req -in $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-server.csr \
+	        -CA $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.crt \
+	        -CAkey $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.key \
+	        -CAcreateserial -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-server.crt \
+	        -days $(CERT_VALIDITY_DAYS) \
+	        -extfile <(printf "subjectAltName=DNS:*.mesh.cilium.io,DNS:clustermesh-apiserver.kube-system.svc,DNS:clustermesh-apiserver.kube-system.svc.cluster.local,IP:127.0.0.1\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth,clientAuth"); \
+	    \
+	    echo "    Admin certificate..."; \
+	    openssl genrsa -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-admin.key 4096; \
+	    openssl req -new -key $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-admin.key \
+	        -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-admin.csr \
+	        -subj "/CN=root"; \
+	    openssl x509 -req -in $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-admin.csr \
+	        -CA $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.crt \
+	        -CAkey $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.key \
+	        -CAcreateserial -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-admin.crt \
+	        -days $(CERT_VALIDITY_DAYS) \
+	        -extfile <(printf "keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth"); \
+	    \
+	    echo "    Local certificate..."; \
+	    openssl genrsa -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-local.key 4096; \
+	    openssl req -new -key $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-local.key \
+	        -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-local.csr \
+	        -subj "/CN=local-$$cluster"; \
+	    openssl x509 -req -in $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-local.csr \
+	        -CA $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.crt \
+	        -CAkey $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.key \
+	        -CAcreateserial -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-local.crt \
+	        -days $(CERT_VALIDITY_DAYS) \
+	        -extfile <(printf "keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth"); \
+	    \
+	    echo "    Remote certificate (identity: remote-$$cluster)..."; \
+	    openssl genrsa -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-remote.key 4096; \
+	    openssl req -new -key $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-remote.key \
+	        -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-remote.csr \
+	        -subj "/CN=remote-$$cluster"; \
+	    openssl x509 -req -in $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-remote.csr \
+	        -CA $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.crt \
+	        -CAkey $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.key \
+	        -CAcreateserial -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-remote.crt \
+	        -days $(CERT_VALIDITY_DAYS) \
+	        -extfile <(printf "keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth"); \
+	done
+	    @# ========== Generate Hubble certificates for each cluster ==========
+	@# Only hubble-server and hubble-relay-client certs needed
+	@# Relay server does NOT use TLS (for easy hubble-ui/CLI access)
+	@for cluster in $(CLUSTER1_NAME) $(CLUSTER2_NAME) $(CLUSTER3_NAME); do \
+	    echo "  Generating Hubble certificates for $$cluster..."; \
+	    \
+	    echo "    Hubble server certificate (for cilium-agent)..."; \
+	    openssl genrsa -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-hubble-server.key 4096; \
+	    openssl req -new -key $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-hubble-server.key \
+	        -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-hubble-server.csr \
+	        -subj "/CN=*.hubble-grpc.kube-system.svc.cluster.local"; \
+	    openssl x509 -req -in $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-hubble-server.csr \
+	        -CA $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.crt \
+	        -CAkey $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.key \
+	        -CAcreateserial -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-hubble-server.crt \
+	        -days $(CERT_VALIDITY_DAYS) \
+	        -extfile <(printf "subjectAltName=DNS:*.hubble-grpc.kube-system.svc.cluster.local,DNS:hubble-peer.kube-system.svc.cluster.local,DNS:hubble-peer.kube-system.svc,DNS:*.$(CLUSTER1_NAME).hubble-grpc.cilium.io,DNS:*.$(CLUSTER2_NAME).hubble-grpc.cilium.io,DNS:*.$(CLUSTER3_NAME).hubble-grpc.cilium.io\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth"); \
+	    \
+	    echo "    Hubble relay client certificate (relay -> hubble servers)..."; \
+	    openssl genrsa -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-hubble-relay-client.key 4096; \
+	    openssl req -new -key $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-hubble-relay-client.key \
+	        -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-hubble-relay-client.csr \
+	        -subj "/CN=*.hubble-relay.cilium.io"; \
+	    openssl x509 -req -in $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-hubble-relay-client.csr \
+	        -CA $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.crt \
+	        -CAkey $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-ca.key \
+	        -CAcreateserial -out $(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-hubble-relay-client.crt \
+	        -days $(CERT_VALIDITY_DAYS) \
+	        -extfile <(printf "keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth"); \
+	done
+	@# Cleanup CSR files
+	@rm -f $(CLUSTERMESH_MULTI_CERTS_DIR)/*.csr
+	@echo ""
+	@echo "  Certificates generated in $(CLUSTERMESH_MULTI_CERTS_DIR)"
+	@echo "  CA keys (DO NOT deploy to clusters):"
+	@echo "    - $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER1_NAME)-ca.key"
+	@echo "    - $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER2_NAME)-ca.key"
+	@echo "    - $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER3_NAME)-ca.key"
+	@echo "  CA bundle: $(CLUSTERMESH_MULTI_CERTS_DIR)/ca-bundle.crt"
+	@echo ""
+	@echo "  Note: Hubble relay server TLS is DISABLED for easy access"
+
+.PHONY: kind-deploy-clustermesh-certs-multi-ca
+kind-deploy-clustermesh-certs-multi-ca: kind-clustermesh-multi-ready ## Deploy certificates with separate CAs to all 3 clusters
+	@echo "  DEPLOY clustermesh certificates (3 different CAs)"
+	@echo "  Note: Hubble secrets are created by Helm via --set values"
+	@# Deploy to each cluster
+	@for cluster in $(CLUSTER1_NAME) $(CLUSTER2_NAME) $(CLUSTER3_NAME); do \
+	    echo "  Deploying to $$cluster..."; \
+	    \
+	    echo "    CA trust bundle (all 3 CAs)..."; \
+	    $(KUBECTL) --context=kind-$$cluster create configmap cilium-root-ca.crt \
+	        -n kube-system \
+	        --from-file=ca.crt=$(CLUSTERMESH_MULTI_CERTS_DIR)/ca-bundle.crt \
+	        --dry-run=client -o yaml | $(KUBECTL) --context=kind-$$cluster apply -f -; \
+	    \
+	    echo "    ClusterMesh server cert..."; \
+	    $(KUBECTL) --context=kind-$$cluster create secret generic clustermesh-apiserver-server-cert \
+	        -n kube-system \
+	        --from-file=tls.crt=$(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-server.crt \
+	        --from-file=tls.key=$(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-server.key \
+	        --from-file=ca.crt=$(CLUSTERMESH_MULTI_CERTS_DIR)/ca-bundle.crt \
+	        --dry-run=client -o yaml | $(KUBECTL) --context=kind-$$cluster apply -f -; \
+	    \
+	    echo "    ClusterMesh admin cert..."; \
+	    $(KUBECTL) --context=kind-$$cluster create secret generic clustermesh-apiserver-admin-cert \
+	        -n kube-system \
+	        --from-file=tls.crt=$(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-admin.crt \
+	        --from-file=tls.key=$(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-admin.key \
+	        --from-file=ca.crt=$(CLUSTERMESH_MULTI_CERTS_DIR)/ca-bundle.crt \
+	        --dry-run=client -o yaml | $(KUBECTL) --context=kind-$$cluster apply -f -; \
+	    \
+	    echo "    ClusterMesh remote cert..."; \
+	    $(KUBECTL) --context=kind-$$cluster create secret generic clustermesh-apiserver-remote-cert \
+	        -n kube-system \
+	        --from-file=tls.crt=$(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-remote.crt \
+	        --from-file=tls.key=$(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-remote.key \
+	        --from-file=ca.crt=$(CLUSTERMESH_MULTI_CERTS_DIR)/ca-bundle.crt \
+	        --dry-run=client -o yaml | $(KUBECTL) --context=kind-$$cluster apply -f -; \
+	    \
+	    echo "    ClusterMesh local cert..."; \
+	    $(KUBECTL) --context=kind-$$cluster create secret generic clustermesh-apiserver-local-cert \
+	        -n kube-system \
+	        --from-file=tls.crt=$(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-local.crt \
+	        --from-file=tls.key=$(CLUSTERMESH_MULTI_CERTS_DIR)/$$cluster-local.key \
+	        --from-file=ca.crt=$(CLUSTERMESH_MULTI_CERTS_DIR)/ca-bundle.crt \
+	        --dry-run=client -o yaml | $(KUBECTL) --context=kind-$$cluster apply -f -; \
+	done
+	@echo "  ClusterMesh certificates deployed successfully"
+	@echo "  Hubble secrets will be created by Helm during install"
+
+.PHONY: kind-clean-clustermesh-certs-multi-ca
+kind-clean-clustermesh-certs-multi-ca: ## Clean generated multi-CA clustermesh certificates
+	@echo "  CLEAN clustermesh multi-CA certificates"
+	@rm -rf $(CLUSTERMESH_MULTI_CERTS_DIR)
+
+# Helper to get the control plane IP for a kind cluster
+define get_kind_ip
+$(shell docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $(1)-control-plane)
+endef
+
+.PHONY: kind-generate-clustermesh-multi-values
+kind-generate-clustermesh-multi-values: kind-clustermesh-multi-ready ## Generate helm values files for 3-cluster setup
+	@echo "  GENERATE helm values for multi-cluster setup"
+	@mkdir -p $(ROOT_DIR)/contrib/testing
+	$(eval CLUSTER1_IP := $(call get_kind_ip,$(CLUSTER1_NAME)))
+	$(eval CLUSTER2_IP := $(call get_kind_ip,$(CLUSTER2_NAME)))
+	$(eval CLUSTER3_IP := $(call get_kind_ip,$(CLUSTER3_NAME)))
+	@echo "  Cluster IPs: $(CLUSTER1_NAME)=$(CLUSTER1_IP), $(CLUSTER2_NAME)=$(CLUSTER2_IP), $(CLUSTER3_NAME)=$(CLUSTER3_IP)"
+	@echo "  Use kind-install-cilium-clustermesh-multi-ca to install with these IPs"
+
+# Main installation target
+.PHONY: kind-install-cilium-clustermesh-multi-ca
+kind-install-cilium-clustermesh-multi-ca: check_deps kind-clustermesh-multi-ready kind-load-base-images-multi kind-generate-clustermesh-certs-multi-ca kind-deploy-clustermesh-certs-multi-ca ## Install Cilium on 3 clusters with separate CAs using helm values
+	@echo "  INSTALL Cilium on 3 clusters with multi-CA clustermesh and Hubble"
+	@# Get cluster IPs
+	$(eval CLUSTER1_IP := $(call get_kind_ip,$(CLUSTER1_NAME)))
+	$(eval CLUSTER2_IP := $(call get_kind_ip,$(CLUSTER2_NAME)))
+	$(eval CLUSTER3_IP := $(call get_kind_ip,$(CLUSTER3_NAME)))
+	@echo "  Cluster IPs: $(CLUSTER1_NAME)=$(CLUSTER1_IP), $(CLUSTER2_NAME)=$(CLUSTER2_IP), $(CLUSTER3_NAME)=$(CLUSTER3_IP)"
+	@# Base64 encode ClusterMesh certificates for helm values
+	$(eval CLUSTER1_REMOTE_CERT := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER1_NAME)-remote.crt | base64 -w0))
+	$(eval CLUSTER1_REMOTE_KEY := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER1_NAME)-remote.key | base64 -w0))
+	$(eval CLUSTER2_REMOTE_CERT := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER2_NAME)-remote.crt | base64 -w0))
+	$(eval CLUSTER2_REMOTE_KEY := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER2_NAME)-remote.key | base64 -w0))
+	$(eval CLUSTER3_REMOTE_CERT := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER3_NAME)-remote.crt | base64 -w0))
+	$(eval CLUSTER3_REMOTE_KEY := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER3_NAME)-remote.key | base64 -w0))
+	$(eval CLUSTER1_CA := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER1_NAME)-ca.crt | base64 -w0))
+	$(eval CLUSTER2_CA := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER2_NAME)-ca.crt | base64 -w0))
+	$(eval CLUSTER3_CA := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER3_NAME)-ca.crt | base64 -w0))
+	@# Base64 encode Hubble certificates for helm values
+	$(eval CLUSTER1_HUBBLE_SERVER_CERT := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER1_NAME)-hubble-server.crt | base64 -w0))
+	$(eval CLUSTER1_HUBBLE_SERVER_KEY := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER1_NAME)-hubble-server.key | base64 -w0))
+	$(eval CLUSTER1_HUBBLE_RELAY_CLIENT_CERT := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER1_NAME)-hubble-relay-client.crt | base64 -w0))
+	$(eval CLUSTER1_HUBBLE_RELAY_CLIENT_KEY := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER1_NAME)-hubble-relay-client.key | base64 -w0))
+	$(eval CLUSTER2_HUBBLE_SERVER_CERT := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER2_NAME)-hubble-server.crt | base64 -w0))
+	$(eval CLUSTER2_HUBBLE_SERVER_KEY := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER2_NAME)-hubble-server.key | base64 -w0))
+	$(eval CLUSTER2_HUBBLE_RELAY_CLIENT_CERT := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER2_NAME)-hubble-relay-client.crt | base64 -w0))
+	$(eval CLUSTER2_HUBBLE_RELAY_CLIENT_KEY := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER2_NAME)-hubble-relay-client.key | base64 -w0))
+	$(eval CLUSTER3_HUBBLE_SERVER_CERT := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER3_NAME)-hubble-server.crt | base64 -w0))
+	$(eval CLUSTER3_HUBBLE_SERVER_KEY := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER3_NAME)-hubble-server.key | base64 -w0))
+	$(eval CLUSTER3_HUBBLE_RELAY_CLIENT_CERT := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER3_NAME)-hubble-relay-client.crt | base64 -w0))
+	$(eval CLUSTER3_HUBBLE_RELAY_CLIENT_KEY := $(shell cat $(CLUSTERMESH_MULTI_CERTS_DIR)/$(CLUSTER3_NAME)-hubble-relay-client.key | base64 -w0))
+	@# ========== Install on Cluster 1 ==========
+	@echo ""
+	@echo "  INSTALL cilium on $(CLUSTER1_NAME)"
+	-$(CILIUM_CLI) --context=kind-$(CLUSTER1_NAME) uninstall >/dev/null 2>&1 || true
+	$(CILIUM_CLI) --context=kind-$(CLUSTER1_NAME) install \
+	    --chart-directory=$(ROOT_DIR)/install/kubernetes/cilium \
+	    --values=$(ROOT_DIR)/contrib/testing/kind-common.yaml \
+	    --values=$(ROOT_DIR)/contrib/testing/kind-fast.yaml \
+	    --set=cluster.name=$(CLUSTER1_NAME) \
+	    --set=cluster.id=1 \
+	    --set=clustermesh.useAPIServer=true \
+	    --set=clustermesh.config.enabled=true \
+	    --set=clustermesh.config.domain=mesh.cilium.io \
+	    --set=clustermesh.config.clusters.$(CLUSTER2_NAME).ips[0]=$(CLUSTER2_IP) \
+	    --set=clustermesh.config.clusters.$(CLUSTER2_NAME).port=$(CLUSTER2_NODEPORT) \
+	    --set=clustermesh.config.clusters.$(CLUSTER2_NAME).tls.cert=$(CLUSTER1_REMOTE_CERT) \
+	    --set=clustermesh.config.clusters.$(CLUSTER2_NAME).tls.key=$(CLUSTER1_REMOTE_KEY) \
+	    --set=clustermesh.config.clusters.$(CLUSTER2_NAME).tls.caCert=$(CLUSTER2_CA) \
+	    --set=clustermesh.config.clusters.$(CLUSTER3_NAME).ips[0]=$(CLUSTER3_IP) \
+	    --set=clustermesh.config.clusters.$(CLUSTER3_NAME).port=$(CLUSTER3_NODEPORT) \
+	    --set=clustermesh.config.clusters.$(CLUSTER3_NAME).tls.cert=$(CLUSTER1_REMOTE_CERT) \
+	    --set=clustermesh.config.clusters.$(CLUSTER3_NAME).tls.key=$(CLUSTER1_REMOTE_KEY) \
+	    --set=clustermesh.config.clusters.$(CLUSTER3_NAME).tls.caCert=$(CLUSTER3_CA) \
+	    --set=clustermesh.apiserver.service.type=NodePort \
+	    --set=clustermesh.apiserver.service.nodePort=$(CLUSTER1_NODEPORT) \
+	    --set=clustermesh.apiserver.tls.authMode=cluster \
+	    --set=clustermesh.apiserver.tls.auto.enabled=false \
+	    --set=clustermesh.apiserver.kvstoremesh.enabled=$(ENABLE_KVSTOREMESH) \
+	    --set=tls.caBundle.enabled=true \
+	    --set=tls.caBundle.name=cilium-root-ca.crt \
+	    --set=tls.caBundle.key=ca.crt \
+	    --set=hubble.enabled=true \
+	    --set=hubble.tls.enabled=true \
+	    --set=hubble.tls.auto.enabled=false \
+	    --set=hubble.tls.server.cert=$(CLUSTER1_HUBBLE_SERVER_CERT) \
+	    --set=hubble.tls.server.key=$(CLUSTER1_HUBBLE_SERVER_KEY) \
+	    --set=hubble.relay.enabled=true \
+	    --set=hubble.relay.tls.client.cert=$(CLUSTER1_HUBBLE_RELAY_CLIENT_CERT) \
+	    --set=hubble.relay.tls.client.key=$(CLUSTER1_HUBBLE_RELAY_CLIENT_KEY) \
+	    --set=hubble.relay.tls.server.enabled=false \
+	    --set=hubble.ui.enabled=true \
+		--set=operator.nodeSelector.kubernetes\\.io/hostname=$(CLUSTER1_NAME)-worker
+	@# ========== Install on Cluster 2 ==========
+	@echo ""
+	@echo "  INSTALL cilium on $(CLUSTER2_NAME)"
+	-$(CILIUM_CLI) --context=kind-$(CLUSTER2_NAME) uninstall >/dev/null 2>&1 || true
+	$(CILIUM_CLI) --context=kind-$(CLUSTER2_NAME) install \
+	    --chart-directory=$(ROOT_DIR)/install/kubernetes/cilium \
+	    --values=$(ROOT_DIR)/contrib/testing/kind-common.yaml \
+	    --values=$(ROOT_DIR)/contrib/testing/kind-fast.yaml \
+	    --set=cluster.name=$(CLUSTER2_NAME) \
+	    --set=cluster.id=2 \
+	    --set=clustermesh.useAPIServer=true \
+	    --set=clustermesh.config.enabled=true \
+	    --set=clustermesh.config.domain=mesh.cilium.io \
+	    --set=clustermesh.config.clusters.$(CLUSTER1_NAME).ips[0]=$(CLUSTER1_IP) \
+	    --set=clustermesh.config.clusters.$(CLUSTER1_NAME).port=$(CLUSTER1_NODEPORT) \
+	    --set=clustermesh.config.clusters.$(CLUSTER1_NAME).tls.cert=$(CLUSTER2_REMOTE_CERT) \
+	    --set=clustermesh.config.clusters.$(CLUSTER1_NAME).tls.key=$(CLUSTER2_REMOTE_KEY) \
+	    --set=clustermesh.config.clusters.$(CLUSTER1_NAME).tls.caCert=$(CLUSTER1_CA) \
+	    --set=clustermesh.config.clusters.$(CLUSTER3_NAME).ips[0]=$(CLUSTER3_IP) \
+	    --set=clustermesh.config.clusters.$(CLUSTER3_NAME).port=$(CLUSTER3_NODEPORT) \
+	    --set=clustermesh.config.clusters.$(CLUSTER3_NAME).tls.cert=$(CLUSTER2_REMOTE_CERT) \
+	    --set=clustermesh.config.clusters.$(CLUSTER3_NAME).tls.key=$(CLUSTER2_REMOTE_KEY) \
+	    --set=clustermesh.config.clusters.$(CLUSTER3_NAME).tls.caCert=$(CLUSTER3_CA) \
+	    --set=clustermesh.apiserver.service.type=NodePort \
+	    --set=clustermesh.apiserver.service.nodePort=$(CLUSTER2_NODEPORT) \
+	    --set=clustermesh.apiserver.tls.authMode=cluster \
+	    --set=clustermesh.apiserver.tls.auto.enabled=false \
+	    --set=clustermesh.apiserver.kvstoremesh.enabled=$(ENABLE_KVSTOREMESH) \
+	    --set=tls.caBundle.enabled=true \
+	    --set=tls.caBundle.name=cilium-root-ca.crt \
+	    --set=tls.caBundle.key=ca.crt \
+	    --set=hubble.enabled=true \
+	    --set=hubble.tls.enabled=true \
+	    --set=hubble.tls.auto.enabled=false \
+	    --set=hubble.tls.server.cert=$(CLUSTER2_HUBBLE_SERVER_CERT) \
+	    --set=hubble.tls.server.key=$(CLUSTER2_HUBBLE_SERVER_KEY) \
+	    --set=hubble.relay.enabled=true \
+	    --set=hubble.relay.tls.client.cert=$(CLUSTER2_HUBBLE_RELAY_CLIENT_CERT) \
+	    --set=hubble.relay.tls.client.key=$(CLUSTER2_HUBBLE_RELAY_CLIENT_KEY) \
+	    --set=hubble.relay.tls.server.enabled=false \
+	    --set=hubble.ui.enabled=true \
+		--set=operator.nodeSelector.kubernetes\\.io/hostname=$(CLUSTER2_NAME)-worker
+	@# ========== Install on Cluster 3 ==========
+	@echo ""
+	@echo "  INSTALL cilium on $(CLUSTER3_NAME)"
+	-$(CILIUM_CLI) --context=kind-$(CLUSTER3_NAME) uninstall >/dev/null 2>&1 || true
+	$(CILIUM_CLI) --context=kind-$(CLUSTER3_NAME) install \
+	    --chart-directory=$(ROOT_DIR)/install/kubernetes/cilium \
+	    --values=$(ROOT_DIR)/contrib/testing/kind-common.yaml \
+	    --values=$(ROOT_DIR)/contrib/testing/kind-fast.yaml \
+	    --set=cluster.name=$(CLUSTER3_NAME) \
+	    --set=cluster.id=3 \
+	    --set=clustermesh.useAPIServer=true \
+	    --set=clustermesh.config.enabled=true \
+	    --set=clustermesh.config.domain=mesh.cilium.io \
+	    --set=clustermesh.config.clusters.$(CLUSTER1_NAME).ips[0]=$(CLUSTER1_IP) \
+	    --set=clustermesh.config.clusters.$(CLUSTER1_NAME).port=$(CLUSTER1_NODEPORT) \
+	    --set=clustermesh.config.clusters.$(CLUSTER1_NAME).tls.cert=$(CLUSTER3_REMOTE_CERT) \
+	    --set=clustermesh.config.clusters.$(CLUSTER1_NAME).tls.key=$(CLUSTER3_REMOTE_KEY) \
+	    --set=clustermesh.config.clusters.$(CLUSTER1_NAME).tls.caCert=$(CLUSTER1_CA) \
+	    --set=clustermesh.config.clusters.$(CLUSTER2_NAME).ips[0]=$(CLUSTER2_IP) \
+	    --set=clustermesh.config.clusters.$(CLUSTER2_NAME).port=$(CLUSTER2_NODEPORT) \
+	    --set=clustermesh.config.clusters.$(CLUSTER2_NAME).tls.cert=$(CLUSTER3_REMOTE_CERT) \
+	    --set=clustermesh.config.clusters.$(CLUSTER2_NAME).tls.key=$(CLUSTER3_REMOTE_KEY) \
+	    --set=clustermesh.config.clusters.$(CLUSTER2_NAME).tls.caCert=$(CLUSTER2_CA) \
+	    --set=clustermesh.apiserver.service.type=NodePort \
+	    --set=clustermesh.apiserver.service.nodePort=$(CLUSTER3_NODEPORT) \
+	    --set=clustermesh.apiserver.tls.authMode=cluster \
+	    --set=clustermesh.apiserver.tls.auto.enabled=false \
+	    --set=clustermesh.apiserver.kvstoremesh.enabled=$(ENABLE_KVSTOREMESH) \
+	    --set=tls.caBundle.enabled=true \
+	    --set=tls.caBundle.name=cilium-root-ca.crt \
+	    --set=tls.caBundle.key=ca.crt \
+	    --set=hubble.enabled=true \
+	    --set=hubble.tls.enabled=true \
+	    --set=hubble.tls.auto.enabled=false \
+	    --set=hubble.tls.server.cert=$(CLUSTER3_HUBBLE_SERVER_CERT) \
+	    --set=hubble.tls.server.key=$(CLUSTER3_HUBBLE_SERVER_KEY) \
+	    --set=hubble.relay.enabled=true \
+	    --set=hubble.relay.tls.client.cert=$(CLUSTER3_HUBBLE_RELAY_CLIENT_CERT) \
+	    --set=hubble.relay.tls.client.key=$(CLUSTER3_HUBBLE_RELAY_CLIENT_KEY) \
+	    --set=hubble.relay.tls.server.enabled=false \
+	    --set=hubble.ui.enabled=true \
+		--set=operator.nodeSelector.kubernetes\\.io/hostname=$(CLUSTER3_NAME)-worker
+	@# ========== Load fast images ==========
+	@echo ""
+	@echo "  Loading fast images..."
+	$(MAKE) kind-image-fast-multi
+	@# ========== Verify connectivity ==========
+	@echo ""
+	@echo "  Waiting for clustermesh to be ready..."
+	$(CILIUM_CLI) clustermesh status --context kind-$(CLUSTER1_NAME) --wait --wait-duration 5m
+	$(CILIUM_CLI) clustermesh status --context kind-$(CLUSTER2_NAME) --wait --wait-duration 5m
+	$(CILIUM_CLI) clustermesh status --context kind-$(CLUSTER3_NAME) --wait --wait-duration 5m
+	@echo ""
+	@echo "  ✅ 3-cluster ClusterMesh with separate CAs and Hubble is ready!"
+	@echo ""
+	@echo "  Hubble access (no TLS required):"
+	@echo "    hubble observe --server localhost:4245"
+	@echo "    kubectl port-forward -n kube-system svc/hubble-relay 4245:80"
+	@echo ""
+	@echo "  Hubble UI: kubectl port-forward -n kube-system svc/hubble-ui 12000:80"
+
+.PHONY: kind-load-base-images-multi
+kind-load-base-images-multi: ## Load base images into all 3 clusters
+	@echo "  PULL cluster images"
+	for image in $(PREPULL_IMAGES); do docker pull --platform linux/amd64 $$image 2>/dev/null || true; done
+	for cluster_name in $(CLUSTER1_NAME) $(CLUSTER2_NAME) $(CLUSTER3_NAME); do \
+	    kind load docker-image $(PREPULL_IMAGES) -n $$cluster_name || true; \
+	done
+
+.PHONY: kind-image-fast-multi
+kind-image-fast-multi: ## Build and copy binaries to all 3 kind nodes
+	KIND_CLUSTERS="$(CLUSTER1_NAME) $(CLUSTER2_NAME) $(CLUSTER3_NAME)" $(MAKE) kind-image-fast
+
+.PHONY: kind-clustermesh-multi-status
+kind-clustermesh-multi-status: ## Check clustermesh status on all 3 clusters
+	@echo "  CLUSTERMESH STATUS"
+	@echo ""
+	@echo "=== $(CLUSTER1_NAME) ==="
+	$(CILIUM_CLI) clustermesh status --context kind-$(CLUSTER1_NAME) || true
+	@echo ""
+	@echo "=== $(CLUSTER2_NAME) ==="
+	$(CILIUM_CLI) clustermesh status --context kind-$(CLUSTER2_NAME) || true
+	@echo ""
+	@echo "=== $(CLUSTER3_NAME) ==="
+	$(CILIUM_CLI) clustermesh status --context kind-$(CLUSTER3_NAME) || true
+
+.PHONY: kind-hubble-ui
+kind-hubble-ui: ## Port-forward Hubble UI for all 3 clusters (run in separate terminals)
+	@echo "  HUBBLE UI port-forward instructions:"
+	@echo ""
+	@echo "  Run each command in a separate terminal:"
+	@echo "    kubectl --context=kind-$(CLUSTER1_NAME) port-forward -n kube-system svc/hubble-ui 12001:80"
+	@echo "    kubectl --context=kind-$(CLUSTER2_NAME) port-forward -n kube-system svc/hubble-ui 12002:80"
+	@echo "    kubectl --context=kind-$(CLUSTER3_NAME) port-forward -n kube-system svc/hubble-ui 12003:80"
+	@echo ""
+	@echo "  Then open in browser:"
+	@echo "    http://localhost:12001 ($(CLUSTER1_NAME))"
+	@echo "    http://localhost:12002 ($(CLUSTER2_NAME))"
+	@echo "    http://localhost:12003 ($(CLUSTER3_NAME))"
+	@echo ""
+	@echo "  Hubble CLI (no TLS required):"
+	@echo "    kubectl --context=kind-$(CLUSTER1_NAME) port-forward -n kube-system svc/hubble-relay 4245:80 &"
+	@echo "    hubble observe --server localhost:4245"
+
+.PHONY: kind-clustermesh-multi-restart
+kind-clustermesh-multi-restart: ## Restart all clustermesh components on all 3 clusters
+	@echo "  RESTART clustermesh components"
+	@for cluster in $(CLUSTER1_NAME) $(CLUSTER2_NAME) $(CLUSTER3_NAME); do \
+	    echo "  Restarting $$cluster..."; \
+	    kubectl --context=kind-$$cluster -n kube-system rollout restart deployment/clustermesh-apiserver; \
+	    kubectl --context=kind-$$cluster -n kube-system rollout restart deployment/hubble-relay; \
+	    kubectl --context=kind-$$cluster -n kube-system rollout restart deployment/hubble-ui; \
+	    kubectl --context=kind-$$cluster -n kube-system rollout restart ds/cilium; \
+	done
+	@echo "  Waiting for rollouts..."
+	@for cluster in $(CLUSTER1_NAME) $(CLUSTER2_NAME) $(CLUSTER3_NAME); do \
+	    kubectl --context=kind-$$cluster -n kube-system rollout status deployment/clustermesh-apiserver --timeout=120s; \
+	    kubectl --context=kind-$$cluster -n kube-system rollout status deployment/hubble-relay --timeout=120s; \
+	    kubectl --context=kind-$$cluster -n kube-system rollout status deployment/hubble-ui --timeout=120s; \
+	    kubectl --context=kind-$$cluster -n kube-system rollout status ds/cilium --timeout=120s; \
+	done

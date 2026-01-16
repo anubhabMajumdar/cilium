@@ -116,3 +116,4 @@ bpf/.cache
 .envrc
 
 .clustermesh-certs/
+.clustermesh-multi-certs/
