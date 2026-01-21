@@ -256,6 +256,7 @@ check_deps:
 
 include Makefile.kind
 include Makefile.kind.multi
+include Makefile.kind.cm.hubble
 
 -include Makefile.docker
 
